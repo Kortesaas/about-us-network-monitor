@@ -1,0 +1,25 @@
+{
+  "name": "@aboutus/monitor-server",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "PORT=8080 tsx watch --clear-screen=false src/index.ts",
+    "dev:demo": "MONITOR_MODE=demo PORT=8080 tsx watch --clear-screen=false src/index.ts",
+    "build": "esbuild src/index.ts --bundle --platform=node --target=node20 --format=esm --packages=external --sourcemap --outfile=dist/index.js",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "express": "^5.1.0",
+    "net-snmp": "^3.20.0",
+    "zod": "^3.25.0",
+    "oui-data": "^2.1.0"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.0",
+    "@types/node": "^24.0.0",
+    "esbuild": "^0.25.0",
+    "vitest": "^3.2.0"
+  }
+}

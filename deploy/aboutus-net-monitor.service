@@ -1,0 +1,40 @@
+# systemd unit for the ABOUTUS network monitor.
+# Install with deploy/install.sh, or by hand:
+#   sudo cp deploy/aboutus-net-monitor.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now aboutus-net-monitor
+[Unit]
+Description=ABOUTUS network monitor (aboutus-net)
+Documentation=file:///opt/about-us-network-monitor/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=aboutus
+Group=aboutus
+WorkingDirectory=/opt/about-us-network-monitor
+Environment=NODE_ENV=production
+Environment=PORT=80
+Environment=DATA_DIR=/var/lib/aboutus-net-monitor
+# Optional overrides — uncomment to change:
+#Environment=LOG_LEVEL=debug
+#Environment=MONITOR_MODE=demo
+ExecStart=/usr/bin/node /opt/about-us-network-monitor/server/dist/index.js
+Restart=always
+RestartSec=3
+TimeoutStopSec=10
+# Bind port 80 and open raw sockets (fping) without running as root.
+AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_NET_RAW
+NoNewPrivileges=false
+# Hardening that still allows the pollers to work.
+ProtectSystem=full
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/aboutus-net-monitor
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=aboutus-net-monitor
+
+[Install]
+WantedBy=multi-user.target
