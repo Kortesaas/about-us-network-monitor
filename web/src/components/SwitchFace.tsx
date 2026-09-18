@@ -6,32 +6,35 @@ import { cn } from '@/ui/cn'
 import { readableTextColor } from '@/utils/color'
 import { formatBps } from '@/utils/format'
 
-const TRUNK_FILL = '#0b0f1a'
-const TRUNK_TEXT = '#facc15'
-const UNKNOWN_FILL = '#475569'
-const UNUSED_FILL = '#334155'
+// Theme tokens (styles.css) so the panels are light in light mode; VLAN colours come from the plan.
+const TRUNK_FILL = 'var(--face-trunk)'
+const TRUNK_TEXT = 'var(--face-trunk-text)'
+const UNKNOWN_FILL = 'var(--face-unknown)'
+const UNUSED_FILL = 'var(--face-unused)'
 
 export type PortView = 'live' | 'planned'
 
 /** Colour and label of a port cell: what it *is* right now (live) or what the plan says. */
 export function portAppearance(port: SwitchPort, vlans: VlanState[], view: PortView) {
   const colorOf = (vlanId: number | null) => vlans.find((vlan) => vlan.vlanId === vlanId)?.color ?? UNKNOWN_FILL
+  // VLAN colours are real hex values; the unknown fill is a theme token whose text colour is a token too.
+  const textOn = (fill: string) => (fill === UNKNOWN_FILL ? 'var(--face-unknown-text)' : readableTextColor(fill))
   const nameOf = (vlanId: number | null) => vlans.find((vlan) => vlan.vlanId === vlanId)?.name ?? (vlanId !== null ? `VLAN ${vlanId}` : '')
   const planned = port.planned
   const discovered = port.discovered
   if (view === 'live' && discovered && discovered.mode !== 'unknown') {
     if (discovered.mode === 'trunk')
       return { background: TRUNK_FILL, foreground: TRUNK_TEXT, label: planned?.name || 'TRUNK', stripes: discovered.taggedVlanIds.map(colorOf), mode: 'trunk' as const }
-    return { background: colorOf(discovered.pvid), foreground: readableTextColor(colorOf(discovered.pvid)), label: nameOf(discovered.pvid), stripes: [], mode: 'access' as const }
+    return { background: colorOf(discovered.pvid), foreground: textOn(colorOf(discovered.pvid)), label: nameOf(discovered.pvid), stripes: [], mode: 'access' as const }
   }
   if (planned) {
-    if (planned.mode === 'unused') return { background: UNUSED_FILL, foreground: '#cbd5e1', label: 'unused', stripes: [], mode: 'unused' as const }
+    if (planned.mode === 'unused') return { background: UNUSED_FILL, foreground: 'var(--face-unused-text)', label: 'unused', stripes: [], mode: 'unused' as const }
     if (planned.mode === 'trunk' || planned.mode === 'hybrid')
       return { background: TRUNK_FILL, foreground: TRUNK_TEXT, label: planned.name || 'TRUNK', stripes: planned.taggedVlanIds.map(colorOf), mode: 'trunk' as const }
     const vlan = planned.accessVlanId ?? planned.nativeVlanId
-    return { background: colorOf(vlan), foreground: readableTextColor(colorOf(vlan)), label: planned.name || nameOf(vlan), stripes: [], mode: 'access' as const }
+    return { background: colorOf(vlan), foreground: textOn(colorOf(vlan)), label: planned.name || nameOf(vlan), stripes: [], mode: 'access' as const }
   }
-  return { background: UNKNOWN_FILL, foreground: '#ffffff', label: '', stripes: [], mode: 'unknown' as const }
+  return { background: UNKNOWN_FILL, foreground: 'var(--face-unknown-text)', label: '', stripes: [], mode: 'unknown' as const }
 }
 
 export function SwitchFace({
@@ -49,7 +52,10 @@ export function SwitchFace({
   onSelect?: (port: number) => void
   view?: PortView
   compact?: boolean
-  /** Ports to emphasise (e.g. those carrying a VLAN); others are dimmed. */
+  /**
+   * Highlight mode (VLAN page): ports in the set are shown normally, ports in the set with link or a
+   * device plugged in are emphasised, every other port is dimmed. Link state alone never dims here.
+   */
   highlight?: Set<number> | null
 }) {
   const total = sw.portCount + sw.sfpPortCount
@@ -75,7 +81,7 @@ export function SwitchFace({
                   compact={compact}
                   live={live}
                   selected={selected === port.number}
-                  dimmed={highlight ? !highlight.has(port.number) : false}
+                  emphasis={highlight ? (highlight.has(port.number) ? ((port.link?.operUp ?? false) || port.devices.length > 0 ? 'active' : 'match') : 'other') : null}
                   onClick={onSelect ? () => onSelect(port.number) : undefined}
                 />
               ) : (
@@ -96,7 +102,7 @@ function PortCell({
   compact,
   live,
   selected,
-  dimmed,
+  emphasis,
   onClick,
 }: {
   port: SwitchPort
@@ -105,7 +111,7 @@ function PortCell({
   compact: boolean
   live: boolean
   selected: boolean
-  dimmed: boolean
+  emphasis: 'other' | 'match' | 'active' | null
   onClick?: () => void
 }) {
   const look = portAppearance(port, vlans, view)
@@ -146,19 +152,21 @@ function PortCell({
       className={cn(
         'relative w-full overflow-hidden rounded-sm border text-center transition-all',
         compact ? 'h-[26px]' : 'h-[54px]',
-        selected ? 'border-white ring-2 ring-white ring-offset-2 ring-offset-[var(--canvas)]' : hasDiff ? 'border-amber-400' : 'border-transparent',
+        selected ? 'border-[var(--face-ring)] ring-2 ring-[var(--face-ring)] ring-offset-2 ring-offset-[var(--canvas)]' : emphasis === 'active' ? 'border-[var(--face-ring)] shadow-[0_0_0_1px_var(--face-ring-soft)]' : hasDiff ? 'border-amber-400' : 'border-transparent',
         onClick && 'hover:brightness-110',
-        (down || dimmed) && !selected && 'opacity-40 saturate-50',
-        port.role === 'sfp' && 'ring-1 ring-inset ring-white/20',
+        // Highlight mode: three states (other / carries the VLAN / carries it and is in use). Otherwise link-down ports fade.
+        !selected && (emphasis === 'other' ? 'opacity-30 saturate-50' : emphasis === 'match' ? 'opacity-75' : emphasis === null && down ? 'opacity-40 saturate-50' : ''),
+        port.role === 'sfp' && 'ring-1 ring-inset ring-[var(--face-ring-soft)]',
       )}
       style={{ background: look.background, color: look.foreground }}
     >
-      {live && up !== null && (
+      {live && up !== null && !compact && (
         <span
-          className={cn('absolute right-1 top-1 h-1.5 w-1.5 rounded-full', up ? 'bg-[#3ecf8e] shadow-[0_0_4px_#3ecf8e]' : 'bg-black/40 ring-1 ring-white/30')}
+          className={cn('absolute right-1 top-1 h-1.5 w-1.5 rounded-full', up ? 'bg-[#3ecf8e] shadow-[0_0_4px_#3ecf8e]' : 'bg-[var(--face-unused)] ring-1 ring-[var(--face-ring-soft)]')}
           aria-hidden="true"
         />
       )}
+      {live && up && compact && <span className="absolute inset-x-0 bottom-0 h-[3px] bg-[#3ecf8e]" aria-hidden="true" />}
       {!compact && port.uplink && <ArrowUpFromLine size={9} className="absolute left-1 top-1 opacity-80" aria-label="Uplink" />}
       {!compact && !port.uplink && port.lldp.length > 0 && <Link2 size={9} className="absolute left-1 top-1 opacity-80" aria-label="LLDP neighbour" />}
       {hasDiff && (
@@ -186,7 +194,7 @@ function PortCell({
 
 export function FaceLegend({ vlans, view }: { vlans: VlanState[]; view: PortView }) {
   return (
-    <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 text-[11px] text-slate-400">
+    <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 text-[11px] text-muted">
       {vlans
         .filter((vlan) => vlan.planned)
         .map((vlan) => (
@@ -196,11 +204,11 @@ export function FaceLegend({ vlans, view }: { vlans: VlanState[]; view: PortView
           </span>
         ))}
       <span className="flex items-center gap-1.5">
-        <span className="h-2.5 w-2.5 rounded-[2px] bg-[#0b0f1a] ring-1 ring-slate-600" />
+        <span className="h-2.5 w-2.5 rounded-[2px] bg-[var(--face-trunk)] ring-1 ring-[var(--face-ring-soft)]" />
         Trunk
       </span>
       <span className="flex items-center gap-1.5">
-        <span className="h-2.5 w-2.5 rounded-[2px] bg-[#334155]" />
+        <span className="h-2.5 w-2.5 rounded-[2px] bg-[var(--face-unused)]" />
         Unused
       </span>
       {view === 'live' && (
@@ -209,7 +217,7 @@ export function FaceLegend({ vlans, view }: { vlans: VlanState[]; view: PortView
             <span className="h-1.5 w-1.5 rounded-full bg-[#3ecf8e]" /> link up
           </span>
           <span className="flex items-center gap-1.5">
-            <span className="h-2.5 w-2.5 rounded-[2px] bg-slate-500 opacity-40" /> link down
+            <span className="h-2.5 w-2.5 rounded-[2px] bg-[var(--face-unknown)] opacity-40" /> link down
           </span>
           <span className="flex items-center gap-1.5">
             <span className="grid h-3 w-3 place-items-center rounded-full bg-amber-400 text-black">

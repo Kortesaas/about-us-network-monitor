@@ -1,5 +1,5 @@
 import { networkInterfaces } from 'node:os'
-import type { DeviceLocation, DeviceState, KnownDeviceMeta, PlannedDevice, SwitchState } from '@shared/types'
+import type { DeviceLocation, DeviceState, KnownDeviceMeta, PlannedDevice, SignalQuality, SwitchState } from '@shared/types'
 import { normalizeMac, isLocallyAdministered } from '@shared/mac'
 import { cidrContains, parseCidr } from '@shared/ip'
 import type { Store, DeviceTrack } from '../state/store.js'
@@ -32,6 +32,24 @@ export function buildDevices(store: Store, switches: SwitchState[], now: number)
   const gateways = store.inventory.subnets.map((subnet) => subnet.gateway).filter(Boolean)
   const router = store.inventory.devices.find((device) => device.type === 'router' && gateways.includes(device.managementIp))
   for (const gateway of gateways) if (router && !inventoryByIp.has(gateway)) inventoryByIp.set(gateway, router)
+
+  // Router MAC tables: MAC → the router LAN port it hangs on. A port carrying a switch's MAC (or a crowd of
+  // MACs) is the router's uplink into the switched network and says nothing about where a device sits.
+  const switchMacs = new Set<string>()
+  for (const raw of store.switches.values()) for (const iface of raw.interfaces.values()) if (iface.physAddress) switchMacs.add(iface.physAddress)
+  const routerPorts = new Map<string, { routerId: string; routerName: string; portName: string }>()
+  for (const [routerId, raw] of store.routerTraffic) {
+    if (!store.isInUse(routerId) || now - (raw.lastOkAt ?? 0) > staleMs) continue
+    const routerName = store.inventory.devices.find((item) => item.id === routerId)?.name ?? routerId
+    const perPort = new Map<number, Set<string>>()
+    for (const entry of raw.fdb) perPort.set(entry.ifIndex, (perPort.get(entry.ifIndex) ?? new Set()).add(entry.mac))
+    for (const entry of raw.fdb) {
+      const macsOnPort = perPort.get(entry.ifIndex)!
+      if (macsOnPort.size >= thresholds.uplinkMacThreshold || [...macsOnPort].some((mac) => switchMacs.has(mac))) continue
+      routerPorts.set(entry.mac, { routerId, routerName, portName: entry.portName })
+    }
+  }
+  const routerPortFor = (mac: string) => routerPorts.get(mac) ?? null
 
   /* ---- 1. group observations by identity ---- */
   const groups = new Map<string, Group>()
@@ -196,7 +214,7 @@ export function buildDevices(store: Store, switches: SwitchState[], now: number)
       }
       const wireless = store.wirelessClients.get(mac)
       if (wireless && now - wireless.at <= offlineMs) {
-        sources.add('omada')
+        sources.add(wireless.source === 'omada' ? 'omada' : 'wifi')
         lastConfirmed = max(lastConfirmed, wireless.at)
       }
     }
@@ -209,9 +227,34 @@ export function buildDevices(store: Store, switches: SwitchState[], now: number)
     const edge = lldpSighting ?? sightings.find((entry) => !entry.uplink && now - entry.seenAt <= staleMs)
     const uplinkOnly = !edge ? sightings.find((entry) => now - entry.seenAt <= staleMs) : undefined
     const isInfraLink = group.infra && (group.infra.type === 'switch' || group.infra.type === 'router')
-    const chosen = edge ?? (isInfraLink ? uplinkOnly : undefined)
-    if (!edge && uplinkOnly && !isInfraLink)
-      flags.push(`seen via ${switchById.get(uplinkOnly.switchId)?.name ?? uplinkOnly.switchId} uplink port ${uplinkOnly.port}`)
+    let chosen = edge ?? (isInfraLink ? uplinkOnly : undefined)
+    // Only seen on uplinks: if one of them leads to a non-switch neighbour (the router's LAN ports, an
+    // unmanaged box), the device sits one hop behind it — that is a location, not a mystery.
+    let behind: DeviceState['behind'] = null
+    if (!edge && !isInfraLink) {
+      // The router's own MAC table names the LAN port; that beats any inference from switch uplinks.
+      for (const mac of macs) {
+        const hit = routerPortFor(mac)
+        if (hit) {
+          behind = { infraId: hit.routerId, name: hit.routerName, devicePort: hit.portName, switchId: null, switchName: null, port: null, portName: null }
+          break
+        }
+      }
+      if (uplinkOnly) {
+        for (const sighting of sightings) {
+          if (now - sighting.seenAt > staleMs) continue
+          const sw = switchById.get(sighting.switchId)
+          const port = sw?.ports.find((item) => item.number === sighting.port)
+          const neighbor = port?.lldp.map((item) => item.deviceId).find((id) => id && !switchById.has(id) && id !== group.infra?.id)
+          const infra = neighbor ? store.inventory.devices.find((item) => item.id === neighbor) : undefined
+          if (sw && port && infra && (!behind || behind.infraId === infra.id)) {
+            behind = { infraId: infra.id, name: infra.name, devicePort: behind?.devicePort ?? null, switchId: sw.id, switchName: sw.name, port: port.number, portName: port.planned?.name || null }
+            break
+          }
+        }
+        if (!behind) flags.push(`seen via ${switchById.get(uplinkOnly.switchId)?.name ?? uplinkOnly.switchId} uplink port ${uplinkOnly.port}`)
+      }
+    }
 
     const track = trackFor(store, group.id, now)
     let location: DeviceLocation | null = null
@@ -240,11 +283,24 @@ export function buildDevices(store: Store, switches: SwitchState[], now: number)
       ips.find((ip) => store.pings.get(ip)?.alive) ??
       ips[0] ??
       null
+    const wireless = macs.map((mac) => store.wirelessClients.get(mac)).find((item) => item && now - item.at <= offlineMs) ?? null
     const vlanBySubnet = primaryIp ? vlanForIp(primaryIp) : null
-    const vlanId = vlanBySubnet ?? chosen?.vlanId ?? sightings[0]?.vlanId ?? null
-    const vlanSource: DeviceState['vlanSource'] = vlanBySubnet !== null ? 'subnet' : vlanId !== null ? 'fdb' : null
-    if (vlanBySubnet !== null && chosen?.vlanId !== null && chosen?.vlanId !== undefined && chosen.vlanId !== vlanBySubnet)
+    // A tagged host (the Pi with eth0.10/20/30/40, a Dante device with VLAN interfaces…) is learned in several
+    // VLANs on the same trunk port with one MAC. Each IP explains the sighting in its own subnet's VLAN, so the
+    // sighting that matches the primary IP is the device's VLAN — not whichever VLAN the switch listed last.
+    if (chosen && vlanBySubnet !== null && chosen.vlanId !== vlanBySubnet) {
+      const samePort = sightings.find((entry) => entry.switchId === chosen!.switchId && entry.port === chosen!.port && entry.vlanId === vlanBySubnet && now - entry.seenAt <= staleMs)
+      if (samePort) chosen = { ...samePort, seenAt: Math.max(samePort.seenAt, chosen.seenAt) }
+    }
+    if (chosen && location) location = describeLocation(switchById, chosen.switchId, chosen.port, chosen.vlanId, track.location!.since, chosen.seenAt)
+    const vlanByFdb = chosen?.vlanId ?? sightings[0]?.vlanId ?? null
+    const vlanId = vlanBySubnet ?? vlanByFdb ?? wireless?.vlanId ?? null
+    const vlanSource: DeviceState['vlanSource'] = vlanBySubnet !== null ? 'subnet' : vlanByFdb !== null ? 'fdb' : vlanId !== null ? 'ssid' : null
+    const ipVlans = new Set(ips.map(vlanForIp).filter((vlan): vlan is number => vlan !== null))
+    // Being learned in any VLAN the device holds an address in is fine — only a VLAN it has no address for is a mismatch.
+    if (vlanBySubnet !== null && chosen?.vlanId !== null && chosen?.vlanId !== undefined && chosen.vlanId !== vlanBySubnet && !ipVlans.has(chosen.vlanId))
       flags.push(`IP is in VLAN ${vlanBySubnet} subnet but the switch learned it on VLAN ${chosen.vlanId}`)
+    if (ipVlans.size > 1) flags.push(`tagged host with addresses in VLAN ${[...ipVlans].sort((a, b) => a - b).join(', ')}`)
 
     // Duplicate IP: one IP, several MACs, none of them merged into this device.
     for (const ip of ips) {
@@ -259,7 +315,8 @@ export function buildDevices(store: Store, switches: SwitchState[], now: number)
     if (online) {
       if (location && now - Date.parse(location.since) <= thresholds.relocationWindowSeconds * 1000 && previousLocation)
         status = 'relocating'
-      else status = location ? 'located' : 'unlocated'
+      // An AP association is a location too: the device is behind that AP, whose own port is known.
+      else status = location || behind || wireless ? 'located' : 'unlocated'
     } else status = lastConfirmed !== null && now - lastConfirmed <= offlineMs ? 'stale' : 'offline'
 
     // Offline planned devices without any observation stay offline (never "stale").
@@ -269,7 +326,6 @@ export function buildDevices(store: Store, switches: SwitchState[], now: number)
     if (macOnly && !online && !group.known) continue
 
     const hostname = ips.map((ip) => store.dns.get(ip)?.hostname ?? null).find(Boolean) ?? null
-    const wireless = macs.map((mac) => store.wirelessClients.get(mac)).find((item) => item && now - item.at <= offlineMs) ?? null
     const vendor = vendorForMac(macs[0] ?? null)
     const primaryMac = macs[0] ?? null
     const name =
@@ -299,6 +355,7 @@ export function buildDevices(store: Store, switches: SwitchState[], now: number)
       vlanSource,
       location,
       previousLocation,
+      behind,
       infraId: group.infra?.id ?? null,
       known: group.known,
       firstSeenAt: new Date(track.firstSeenAt).toISOString(),
@@ -308,13 +365,32 @@ export function buildDevices(store: Store, switches: SwitchState[], now: number)
       sources: [...sources],
       macOnly,
       wireless: wireless
-        ? { ap: wireless.apName, ssid: wireless.ssid, band: wireless.band, signal: wireless.signal }
+        ? {
+            apId: wireless.apId,
+            ap: wireless.apName ?? wireless.apMac ?? wireless.apId,
+            ssid: wireless.ssid,
+            band: wireless.band,
+            signal: wireless.signal,
+            quality: signalQuality(wireless.signal),
+            rateMbps: wireless.rateMbps,
+            // Filled in by derive.ts once the APs' own switch ports are known.
+            apLocation: null,
+          }
         : null,
       flags,
     })
   }
 
   return devices.sort(sortDevices)
+}
+
+/** Rough RSSI buckets as Wi-Fi tools usually show them. */
+export function signalQuality(dbm: number | null): SignalQuality | null {
+  if (dbm === null) return null
+  if (dbm >= -55) return 'excellent'
+  if (dbm >= -67) return 'good'
+  if (dbm >= -75) return 'fair'
+  return 'poor'
 }
 
 function lldpLocation(switches: SwitchState[], infraId: string, now: number) {
@@ -360,6 +436,8 @@ const max = (a: number | null, b: number | null) => (a === null ? b : b === null
 
 const rank: Record<DeviceState['status'], number> = { relocating: 0, located: 1, unlocated: 2, stale: 3, offline: 4 }
 function sortDevices(a: DeviceState, b: DeviceState) {
+  // Infrastructure first (by management IP), then favourites, then everything else by status.
+  if ((a.infraId !== null) !== (b.infraId !== null)) return a.infraId !== null ? -1 : 1
   if (a.known?.favorite !== b.known?.favorite) return a.known?.favorite ? -1 : 1
   if (rank[a.status] !== rank[b.status]) return rank[a.status] - rank[b.status]
   if (a.primaryIp && b.primaryIp) return compareIps(a.primaryIp, b.primaryIp)

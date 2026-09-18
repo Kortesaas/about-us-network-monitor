@@ -6,7 +6,9 @@ import { Page } from '@/app/Page'
 import { LoadingState } from '@/components/Loading'
 import { ProblemCard } from '@/components/ProblemCard'
 import { EventRow } from '@/components/EventRow'
+import { LoadMore } from '@/components/LoadMore'
 import { Age, DeviceStatusBadge, VlanChip, deviceStatusHint } from '@/components/status'
+import { Signal } from '@/pages/Wlan'
 import { api } from '@/api/client'
 import { useMonitor } from '@/stores/monitorStore'
 import { Badge, Button, EmptyState, Field, Input, KeyValue, Panel, Textarea, Toggle } from '@/ui/kit'
@@ -14,11 +16,14 @@ import { formatDateTime } from '@/utils/format'
 
 const CATEGORIES = ['Console', 'Computer', 'Audio', 'Lighting', 'Video', 'Network', 'Phone/Tablet', 'Printer', 'Other']
 
+const HISTORY_PAGE = 10
+
 export function DevicePage() {
   const { id = '' } = useParams()
   const state = useMonitor((store) => store.state)
   const reload = useMonitor((store) => store.reload)
   const navigate = useNavigate()
+  const [historyShown, setHistoryShown] = useState(HISTORY_PAGE)
   const device = state?.devices.find((item) => item.id === decodeURIComponent(id))
   if (!state) return <LoadingState />
   if (!device)
@@ -32,7 +37,7 @@ export function DevicePage() {
       </Page>
     )
   const problems = state.problems.filter((problem) => problem.subject.type === 'device' && problem.subject.id === device.id)
-  const events = state.events.filter((event) => event.subject?.type === 'device' && event.subject.id === device.id).slice(0, 20)
+  const events = state.events.filter((event) => event.subject?.type === 'device' && event.subject.id === device.id)
   const infra = device.infraId ? state.infra.find((item) => item.id === device.infraId) : null
 
   return (
@@ -71,7 +76,7 @@ export function DevicePage() {
                   value: (
                     <span className="flex items-center gap-2">
                       <VlanChip vlanId={device.vlanId} vlans={state.vlans} />
-                      {device.vlanSource && <span className="text-faint">from {device.vlanSource === 'subnet' ? 'IP subnet' : 'switch MAC table'}</span>}
+                      {device.vlanSource && <span className="text-faint">from {device.vlanSource === 'subnet' ? 'IP subnet' : device.vlanSource === 'ssid' ? 'SSID mapping' : 'switch MAC table'}</span>}
                     </span>
                   ),
                 },
@@ -87,9 +92,42 @@ export function DevicePage() {
                         since {formatDateTime(device.location.since)} · confirmed <Age iso={device.location.lastSeenAt} />
                       </span>
                     </span>
+                  ) : device.behind ? (
+                    <span>
+                      <span className="font-semibold text-ink">
+                        {device.behind.name}
+                        {device.behind.devicePort ? ` · port ${device.behind.devicePort}` : ''}
+                      </span>
+                      <span className="block text-faint">
+                        {device.behind.devicePort ? `from ${device.behind.name}'s own MAC table` : `on ${device.behind.name}, port unknown`}
+                        {device.behind.switchId && device.behind.port !== null && (
+                          <>
+                            {' · '}reaches the switches via{' '}
+                            <Link to={`/switches/${device.behind.switchId}?port=${device.behind.port}`} className="text-accent-text hover:underline">
+                              {device.behind.switchName} port {device.behind.port}
+                            </Link>
+                          </>
+                        )}
+                      </span>
+                    </span>
                   ) : device.wireless ? (
                     <span>
-                      Wi-Fi via {device.wireless.ap ?? 'unknown AP'} {device.wireless.ssid && `· ${device.wireless.ssid}`} {device.wireless.band && `· ${device.wireless.band}`}
+                      <Link to="/wlan" className="font-semibold text-accent-text hover:underline">
+                        Wi-Fi via {device.wireless.ap}
+                      </Link>
+                      {device.wireless.apLocation && (
+                        <span className="text-muted">
+                          {' '}
+                          on{' '}
+                          <Link to={`/switches/${device.wireless.apLocation.switchId}?port=${device.wireless.apLocation.port}`} className="hover:underline">
+                            {device.wireless.apLocation.switchName} · port {device.wireless.apLocation.port}
+                          </Link>
+                        </span>
+                      )}
+                      <span className="flex flex-wrap items-center gap-2 text-faint">
+                        <Signal dbm={device.wireless.signal} quality={device.wireless.quality} />
+                        <span>{[device.wireless.ssid, device.wireless.band, device.wireless.rateMbps !== null ? `${Math.round(device.wireless.rateMbps)} Mb/s` : null].filter(Boolean).join(' · ')}</span>
+                      </span>
                     </span>
                   ) : (
                     <span className="text-warn">No switch port attributed{device.flags.find((flag) => flag.startsWith('seen via')) ? ` — ${device.flags.find((flag) => flag.startsWith('seen via'))}` : ''}</span>
@@ -132,7 +170,16 @@ export function DevicePage() {
           )}
 
           <Panel title="History" bodyClassName="p-1.5">
-            {events.length === 0 ? <p className="px-2 py-4 text-center text-[12px] text-muted">No recorded events for this device yet.</p> : events.map((event) => <EventRow key={event.id} event={event} showDate />)}
+            {events.length === 0 ? (
+              <p className="px-2 py-4 text-center text-[12px] text-muted">No recorded events for this device yet.</p>
+            ) : (
+              <>
+                {events.slice(0, historyShown).map((event) => (
+                  <EventRow key={event.id} event={event} showDate />
+                ))}
+                <LoadMore shown={historyShown} total={events.length} step={HISTORY_PAGE} onMore={() => setHistoryShown((value) => value + HISTORY_PAGE)} onReset={() => setHistoryShown(HISTORY_PAGE)} />
+              </>
+            )}
           </Panel>
         </div>
 
@@ -149,6 +196,7 @@ const sourceLabel: Record<DeviceState['sources'][number], string> = {
   fdb: 'switch MAC table',
   lldp: 'LLDP',
   dns: 'reverse DNS',
+  wifi: 'access point',
   omada: 'Omada',
   inventory: 'inventory',
 }

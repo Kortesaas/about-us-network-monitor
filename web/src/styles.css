@@ -23,8 +23,17 @@
     --warn-soft: #fdf0dc;
     --danger: #b42318;
     --danger-soft: #fdeceb;
-    --canvas: #0d1220;
-    --canvas-grid: #1b2436;
+    --canvas: #e9edf3;
+    --canvas-grid: #cfd6e2;
+    /* Switch front panels: trunk cells stay dark like on the planner, the rest follows the theme. */
+    --face-trunk: #1f2937;
+    --face-trunk-text: #fbbf24;
+    --face-unused: #cbd5e1;
+    --face-unused-text: #475569;
+    --face-unknown: #94a3b8;
+    --face-unknown-text: #0f172a;
+    --face-ring: #0d1421;
+    --face-ring-soft: rgb(13 20 33 / 25%);
     --shadow: 0 1px 2px rgb(13 20 33 / 6%), 0 1px 3px rgb(13 20 33 / 4%);
     --shadow-lg: 0 12px 32px -8px rgb(13 20 33 / 18%);
     color-scheme: light;
@@ -52,6 +61,14 @@
     --danger-soft: #2b1310;
     --canvas: #060911;
     --canvas-grid: #151d2c;
+    --face-trunk: #0b0f1a;
+    --face-trunk-text: #facc15;
+    --face-unused: #334155;
+    --face-unused-text: #cbd5e1;
+    --face-unknown: #475569;
+    --face-unknown-text: #ffffff;
+    --face-ring: #ffffff;
+    --face-ring-soft: rgb(255 255 255 / 25%);
     --shadow: 0 1px 2px rgb(0 0 0 / 40%);
     --shadow-lg: 0 16px 40px -12px rgb(0 0 0 / 60%);
     color-scheme: dark;
@@ -134,7 +151,7 @@
 .react-flow {
   --xy-background-color: var(--canvas);
   --xy-background-pattern-color: var(--canvas-grid);
-  --xy-edge-stroke: #3b465c;
+  --xy-edge-stroke: var(--border-strong);
   --xy-edge-stroke-selected: var(--accent);
   --xy-minimap-background-color: var(--surface);
   --xy-controls-button-background-color: var(--surface);

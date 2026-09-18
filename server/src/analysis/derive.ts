@@ -7,8 +7,10 @@ import { buildVlans } from './vlans.js'
 import { buildTopology } from './topology.js'
 import { buildProblems } from './checks.js'
 import { buildInternet } from './internet.js'
+import { buildWlan } from './wlan.js'
+import { buildTraffic } from './traffic.js'
 
-export type Derived = Pick<MonitorState, 'summary' | 'internet' | 'vlans' | 'infra' | 'switches' | 'devices' | 'topology' | 'problems' | 'plannedDevices' | 'subnets'>
+export type Derived = Pick<MonitorState, 'summary' | 'internet' | 'vlans' | 'infra' | 'switches' | 'devices' | 'topology' | 'wlan' | 'traffic' | 'problems' | 'plannedDevices' | 'subnets'>
 
 /** Raw observations → everything the UI shows, in dependency order. */
 export function deriveState(store: Store, now: number): Derived {
@@ -24,10 +26,15 @@ export function deriveState(store: Store, now: number): Derived {
       port.devices = located.map((device) => ({ id: device.id, name: device.name, ip: device.primaryIp, vlanId: device.vlanId }))
     }
   const infra = buildInfra(store, switches, devices, now)
+  // Wi-Fi devices enter the wired network on their AP's port.
+  const apPorts = new Map(infra.filter((item) => item.type === 'access-point' && item.locatedAt).map((item) => [item.id, item.locatedAt!]))
+  for (const device of devices) if (device.wireless) device.wireless.apLocation = apPorts.get(device.wireless.apId) ?? null
+  const wlan = buildWlan(store, infra, devices, now)
   const vlans = buildVlans(store, switches, devices, now)
-  const topology = buildTopology(store, switches, infra, devices)
+  const traffic = buildTraffic(store, switches, infra, vlans, now)
   const internet = buildInternet(store, now)
-  const problems = buildProblems(store, switches, infra, devices, vlans, internet, now)
+  const topology = buildTopology(store, switches, infra, devices, internet, traffic)
+  const problems = buildProblems(store, switches, infra, devices, vlans, internet, wlan, now)
   return {
     summary: summarize(switches, infra, devices, vlans, problems),
     internet,
@@ -36,6 +43,8 @@ export function deriveState(store: Store, now: number): Derived {
     switches,
     devices,
     topology,
+    wlan,
+    traffic,
     problems,
     plannedDevices: store.inventory.devices,
     subnets: store.inventory.subnets,

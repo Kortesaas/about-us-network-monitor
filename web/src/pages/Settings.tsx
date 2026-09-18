@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { useLocation } from 'react-router-dom'
-import { Download, RotateCcw, Save, Upload } from 'lucide-react'
+import { Download, RefreshCw, RotateCcw, Save, Upload } from 'lucide-react'
 import type { PublicSettings, SnmpTarget } from '@shared/types'
 import { Page } from '@/app/Page'
 import { LoadingState } from '@/components/Loading'
@@ -91,6 +91,7 @@ export function SettingsPage() {
             <Num label="MAC & LLDP tables (s)" hint="Where devices are plugged in." value={draft.polling.snmpTablesSeconds} min={30} onChange={(v) => update({ polling: { ...draft.polling, snmpTablesSeconds: v } })} />
             <Num label="VLAN configuration (s)" hint="Rarely changes; keeps the plan comparison fresh." value={draft.polling.snmpConfigSeconds} min={60} onChange={(v) => update({ polling: { ...draft.polling, snmpConfigSeconds: v } })} />
             <Num label="Router ARP table (s)" value={draft.polling.routerArpSeconds} min={15} onChange={(v) => update({ polling: { ...draft.polling, routerArpSeconds: v } })} />
+            <Num label="WAN throughput (s)" hint="Router interface counters — a handful of GETs." value={draft.polling.routerTrafficSeconds} min={5} onChange={(v) => update({ polling: { ...draft.polling, routerTrafficSeconds: v } })} />
             <Num label="Local neighbour table (s)" value={draft.polling.neighborSeconds} min={5} onChange={(v) => update({ polling: { ...draft.polling, neighborSeconds: v } })} />
             <Num label="Subnet sweep (s)" hint="One /24 at a time, paced 10 ms per packet." value={draft.polling.sweepSeconds} min={60} onChange={(v) => update({ polling: { ...draft.polling, sweepSeconds: v } })} />
             <Num label="Reverse DNS (s)" value={draft.polling.dnsSeconds} min={60} onChange={(v) => update({ polling: { ...draft.polling, dnsSeconds: v } })} />
@@ -239,6 +240,14 @@ export function SettingsPage() {
               </Field>
               <Num label="Interval (s)" value={draft.internet.intervalSeconds} min={10} onChange={(v) => update({ internet: { ...draft.internet, intervalSeconds: v } })} />
             </div>
+            <Field label="WAN interfaces on the router" hint="Interface names whose counters are the internet throughput (comma separated). Empty = detect DSL-*, WAN-*, PPPoE, LTE names automatically.">
+              <Input
+                className="mono"
+                value={draft.internet.wanInterfaces.join(', ')}
+                placeholder="auto (e.g. DSL-1)"
+                onChange={(event) => update({ internet: { ...draft.internet, wanInterfaces: event.target.value.split(/[,\s]+/).filter(Boolean) } })}
+              />
+            </Field>
           </Panel>
           <Panel title="Sweep ranges" bodyClassName="space-y-3 p-3">
             <Field label="Subnets to sweep (CIDR, one per line)" hint="Empty = every planned subnet. Ranges larger than /22 are refused.">
@@ -277,8 +286,28 @@ export function SettingsPage() {
 
       {tab === 'integrations' && (
         <div className="grid gap-4 xl:grid-cols-2">
+          <Panel title="Access points (standalone Omada EAPs)" bodyClassName="space-y-3 p-3">
+            <p className="text-[12px] leading-5 text-muted">
+              Standalone TP-Link EAPs are read through their own web UI (the same login you use in the browser). This fills the WLAN page and gives Wi-Fi devices their AP, SSID and signal. Every planned access point in the setup is polled with these credentials. The password is stored on the Pi only and never
+              shown again. Note: an EAP allows one admin session — opening its web UI logs the monitor out until the next poll, and vice versa.
+            </p>
+            <Toggle checked={draft.accessPoints.enabled} onChange={(value) => update({ accessPoints: { ...draft.accessPoints, enabled: value } })} label="Enabled" />
+            <div className="grid grid-cols-2 gap-3">
+              <Field label="Username">
+                <Input value={draft.accessPoints.username} autoComplete="off" onChange={(event) => update({ accessPoints: { ...draft.accessPoints, username: event.target.value } })} />
+              </Field>
+              <Field label="Password">
+                <Input type="password" autoComplete="new-password" value={draft.accessPoints.password} onChange={(event) => update({ accessPoints: { ...draft.accessPoints, password: event.target.value } })} />
+              </Field>
+            </div>
+            <div className="grid grid-cols-3 gap-3">
+              <Num label="Clients every (s)" hint="Client and SSID lists — two small requests per AP." value={draft.accessPoints.intervalSeconds} min={5} onChange={(v) => update({ accessPoints: { ...draft.accessPoints, intervalSeconds: v } })} />
+              <Num label="Details every N polls" hint="Radio settings, counters, uptime." value={draft.accessPoints.detailEvery} min={1} max={100} onChange={(v) => update({ accessPoints: { ...draft.accessPoints, detailEvery: v } })} />
+              <Num label="Timeout (ms)" value={draft.accessPoints.timeoutMs} min={500} max={30000} onChange={(v) => update({ accessPoints: { ...draft.accessPoints, timeoutMs: v } })} />
+            </div>
+          </Panel>
           <Panel title="TP-Link Omada controller" bodyClassName="space-y-3 p-3">
-            <p className="text-[12px] leading-5 text-muted">Optional. With a controller and an Open API client (Settings → Platform Integration in Omada), APs show clients per radio and Wi-Fi devices get their SSID and AP. Standalone EAPs cannot be queried.</p>
+            <p className="text-[12px] leading-5 text-muted">Optional, for sites that run an Omada controller: with an Open API client (Settings → Platform Integration in Omada) the controller supplies the same AP and Wi-Fi client data for adopted APs.</p>
             <Toggle checked={draft.omada.enabled} onChange={(value) => update({ omada: { ...draft.omada, enabled: value } })} label="Enabled" />
             <Field label="Controller URL">
               <Input value={draft.omada.baseUrl} onChange={(event) => update({ omada: { ...draft.omada, baseUrl: event.target.value } })} placeholder="https://192.168.99.5:8043" />
@@ -396,6 +425,7 @@ function InventoryTab({ onChanged, setMessage }: { onChanged: () => void; setMes
   const state = useMonitor((store) => store.state)!
   const fileRef = useRef<HTMLInputElement>(null)
   const [busy, setBusy] = useState(false)
+  const [syncing, setSyncing] = useState(false)
   const upload = async (file: File) => {
     setBusy(true)
     try {
@@ -409,6 +439,19 @@ function InventoryTab({ onChanged, setMessage }: { onChanged: () => void; setMes
       setBusy(false)
     }
   }
+  const sync = async () => {
+    setSyncing(true)
+    try {
+      const result = await api.syncInventory()
+      const revision = result.revision !== null ? ` revision ${result.revision},` : ''
+      setMessage({ tone: 'ok', text: `Inventory resynced:${revision} ${result.projectName}, ${result.devices} devices.` })
+      onChanged()
+    } catch (error) {
+      setMessage({ tone: 'danger', text: error instanceof Error ? error.message : 'Sync failed' })
+    } finally {
+      setSyncing(false)
+    }
+  }
   return (
     <div className="space-y-4">
       <Panel
@@ -416,7 +459,11 @@ function InventoryTab({ onChanged, setMessage }: { onChanged: () => void; setMes
         actions={
           <>
             <input ref={fileRef} type="file" accept="application/json,.json" className="hidden" onChange={(event) => event.target.files?.[0] && void upload(event.target.files[0])} />
-            <Button size="sm" onClick={() => fileRef.current?.click()} disabled={busy}>
+            <Button size="sm" onClick={() => void sync()} disabled={busy || syncing}>
+              {syncing ? <Spinner size={12} /> : <RefreshCw size={12} />}
+              Resync network config
+            </Button>
+            <Button size="sm" onClick={() => fileRef.current?.click()} disabled={busy || syncing}>
               {busy ? <Spinner size={12} /> : <Upload size={12} />}
               Upload planner JSON
             </Button>

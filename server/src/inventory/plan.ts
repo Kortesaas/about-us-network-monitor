@@ -68,6 +68,7 @@ const projectSchema = z.object({
       taggedVlanIds: z.array(z.number().int()).default([]),
       poe: z.boolean().default(false),
       speed: z.string().default(''),
+      connectedDevice: z.string().default(''),
     }),
   ),
 })
@@ -98,6 +99,7 @@ export function parseInventory(raw: unknown, source: string): Inventory {
       taggedVlanIds: [...port.taggedVlanIds].sort((a, b) => a - b),
       poe: port.poe,
       speed: port.speed,
+      connectedDevice: port.connectedDevice,
     })
     portsByDevice.set(port.deviceId, list)
   }

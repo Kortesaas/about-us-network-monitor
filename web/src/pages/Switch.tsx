@@ -110,7 +110,7 @@ export function SwitchPage() {
       <div className="p-3 lg:p-5">
         <div className="rounded-lg border border-line bg-canvas p-3 lg:p-5">
           {!sw.snmp.ok && (
-            <p className="mb-3 rounded bg-black/30 px-3 py-2 text-[12px] text-slate-300">
+            <p className="mb-3 rounded bg-surface-2 px-3 py-2 text-[12px] text-muted">
               {sw.reachability === 'offline'
                 ? 'The switch does not answer pings — the map shows the planned configuration only.'
                 : sw.snmp.lastError

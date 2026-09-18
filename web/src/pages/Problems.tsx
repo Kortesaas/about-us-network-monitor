@@ -1,10 +1,11 @@
 import { useMemo, useState } from 'react'
 import { CheckCircle2, ShieldCheck } from 'lucide-react'
-import type { ProblemSeverity } from '@shared/types'
+import type { Problem, ProblemSeverity } from '@shared/types'
 import { Page } from '@/app/Page'
 import { LoadingState } from '@/components/Loading'
 import { ProblemCard } from '@/components/ProblemCard'
 import { useMonitor } from '@/stores/monitorStore'
+import { api } from '@/api/client'
 import { EmptyState, Panel, Segmented, Select } from '@/ui/kit'
 
 const CHECKS: { code: string; label: string }[] = [
@@ -19,7 +20,6 @@ const CHECKS: { code: string; label: string }[] = [
   { code: 'access-vlan-mismatch', label: 'Wrong access VLAN' },
   { code: 'native-vlan-mismatch', label: 'Wrong native VLAN on trunk' },
   { code: 'trunk-missing-vlan', label: 'VLAN missing on trunk' },
-  { code: 'trunk-extra-vlan', label: 'Unplanned VLAN on trunk' },
   { code: 'ap-trunk-mismatch', label: 'AP trunk mismatch' },
   { code: 'ap-port-down', label: 'AP port down' },
   { code: 'uplink-down', label: 'Planned trunk / uplink down' },
@@ -28,23 +28,41 @@ const CHECKS: { code: string; label: string }[] = [
   { code: 'link-speed-low', label: 'Link slower than planned' },
   { code: 'duplicate-ip', label: 'Duplicate IP address' },
   { code: 'device-vlan-mismatch', label: 'Device IP does not match its port VLAN' },
+  { code: 'infra-wrong-port', label: 'Infrastructure on the wrong port' },
+  { code: 'pi-unplanned-ip', label: 'Pi address outside the plan' },
+  { code: 'ap-poll-failed', label: 'No Wi-Fi data from an AP' },
   { code: 'device-offline', label: 'Known device offline' },
-  { code: 'device-moved', label: 'Device changed port' },
-  { code: 'unknown-on-management', label: 'Unknown device on management VLAN' },
 ]
 
+type ProblemPageSeverity = Exclude<ProblemSeverity, 'info'>
+
 export function ProblemsPage() {
-  const state = useMonitor((store) => store.state)
-  const [severity, setSeverity] = useState<'all' | ProblemSeverity>('all')
+  const { state, reload } = useMonitor()
+  const [severity, setSeverity] = useState<'all' | ProblemPageSeverity>('all')
   const [code, setCode] = useState('')
-  const rows = useMemo(() => (state?.problems ?? []).filter((problem) => (severity === 'all' || problem.severity === severity) && (!code || problem.code === code)), [state, severity, code])
+  const [resolving, setResolving] = useState<string | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const activeProblems = useMemo(() => (state?.problems ?? []).filter((problem) => problem.severity !== 'info'), [state])
+  const rows = useMemo(() => activeProblems.filter((problem) => (severity === 'all' || problem.severity === severity) && (!code || problem.code === code)), [activeProblems, severity, code])
   if (!state) return <LoadingState />
-  const counts = { critical: state.summary.problemsCritical, warning: state.summary.problemsWarning, info: state.summary.problemsInfo }
-  const activeCodes = new Set(state.problems.map((problem) => problem.code))
+  const counts = { critical: state.summary.problemsCritical, warning: state.summary.problemsWarning }
+  const activeCodes = new Set(activeProblems.map((problem) => problem.code))
+  const resolveProblem = async (problem: Problem) => {
+    setResolving(problem.id)
+    setError(null)
+    try {
+      await api.resolveProblem(problem.id)
+      await reload()
+    } catch (error) {
+      setError(error instanceof Error ? error.message : 'Could not resolve problem')
+    } finally {
+      setResolving(null)
+    }
+  }
 
   return (
     <Page
-      title="Problems & Checks"
+      title="Problems"
       description="What is wrong, why it matters, what to do. Only devices in use are checked."
       actions={
         <>
@@ -52,10 +70,9 @@ export function ProblemsPage() {
             value={severity}
             onChange={setSeverity}
             options={[
-              { value: 'all', label: `All ${state.problems.length}` },
+              { value: 'all', label: `All ${activeProblems.length}` },
               { value: 'critical', label: `Critical ${counts.critical}` },
               { value: 'warning', label: `Warnings ${counts.warning}` },
-              { value: 'info', label: `Info ${counts.info}` },
             ]}
           />
           <Select value={code} onChange={(event) => setCode(event.target.value)} className="!w-auto" aria-label="Filter by check">
@@ -71,18 +88,19 @@ export function ProblemsPage() {
     >
       <div className="grid gap-4 xl:grid-cols-[1fr_300px]">
         <div className="space-y-2">
+          {error && <div className="rounded border border-danger bg-danger-soft px-3 py-2 text-[12px] text-danger">{error}</div>}
           {rows.length === 0 ? (
             <Panel>
-              <EmptyState icon={<CheckCircle2 size={26} className="text-ok" />} title={state.problems.length === 0 ? 'All checks pass' : 'Nothing in this filter'} description={state.problems.length === 0 ? 'The live network matches the plan and every monitored device answers.' : 'Try another severity or check.'} />
+              <EmptyState icon={<CheckCircle2 size={26} className="text-ok" />} title={activeProblems.length === 0 ? 'No active problems' : 'Nothing in this filter'} description={activeProblems.length === 0 ? 'Critical and warning checks are clear for devices in use.' : 'Try another severity or check.'} />
             </Panel>
           ) : (
-            rows.map((problem) => <ProblemCard key={problem.id} problem={problem} expanded />)
+            rows.map((problem) => <ProblemCard key={problem.id} problem={problem} expanded onResolve={(item) => void resolveProblem(item)} resolving={resolving === problem.id} />)
           )}
         </div>
         <Panel title="Checks" bodyClassName="p-2">
           <ul className="space-y-0.5 text-[12px]">
             {CHECKS.map((check) => {
-              const count = state.problems.filter((problem) => problem.code === check.code).length
+              const count = activeProblems.filter((problem) => problem.code === check.code).length
               return (
                 <li key={check.code}>
                   <button type="button" onClick={() => setCode(code === check.code ? '' : check.code)} className="flex w-full items-center gap-2 rounded px-2 py-1 text-left hover:bg-surface-2">

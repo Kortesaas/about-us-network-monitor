@@ -9,6 +9,8 @@ import { TopologyPage } from '@/pages/Topology'
 import { SwitchesPage } from '@/pages/Switches'
 import { SwitchPage } from '@/pages/Switch'
 import { VlansPage } from '@/pages/Vlans'
+import { WlanPage } from '@/pages/Wlan'
+import { TrafficPage } from '@/pages/Traffic'
 import { ProblemsPage } from '@/pages/Problems'
 import { EventsPage } from '@/pages/Events'
 import { SettingsPage } from '@/pages/Settings'
@@ -27,6 +29,8 @@ export function App() {
         <Route path="/switches" element={<SwitchesPage />} />
         <Route path="/switches/:id" element={<SwitchPage />} />
         <Route path="/vlans" element={<VlansPage />} />
+        <Route path="/wlan" element={<WlanPage />} />
+        <Route path="/traffic" element={<TrafficPage />} />
         <Route path="/problems" element={<ProblemsPage />} />
         <Route path="/events" element={<EventsPage />} />
         <Route path="/settings" element={<SettingsPage />} />

@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { Background, Controls, Handle, MarkerType, MiniMap, Position, ReactFlow, useEdgesState, useNodesState, type Edge, type Node, type NodeProps } from '@xyflow/react'
+import { Background, BaseEdge, Controls, EdgeLabelRenderer, Handle, MarkerType, MiniMap, Position, ReactFlow, getSmoothStepPath, useEdgesState, useNodesState, type Edge, type EdgeProps, type Node, type NodeProps } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
 import dagre from '@dagrejs/dagre'
-import { Cable, Cpu, LayoutGrid, Router, Server, Wifi, HelpCircle, Share2 } from 'lucide-react'
+import { Cable, Cpu, Globe, LayoutGrid, Router, Server, Wifi, HelpCircle, Share2 } from 'lucide-react'
 import type { TopologyEdge, TopologyNode, VlanState } from '@shared/types'
 import { Workspace } from '@/app/Page'
 import { LoadingState } from '@/components/Loading'
@@ -16,13 +16,13 @@ import { formatSpeed } from '@/utils/format'
 
 type NodeData = { item: TopologyNode; vlans: VlanState[] } & Record<string, unknown>
 
-const icons: Record<TopologyNode['kind'], typeof Server> = { switch: Cable, router: Router, 'access-point': Wifi, server: Server, computer: Cpu, media: Server, custom: Server, unknown: HelpCircle }
+const icons: Record<TopologyNode['kind'], typeof Server> = { internet: Globe, switch: Cable, router: Router, 'access-point': Wifi, server: Server, computer: Cpu, media: Server, custom: Server, unknown: HelpCircle }
 
 function DeviceNode({ data, selected }: NodeProps<Node<NodeData>>) {
   const { item } = data
   const Icon = icons[item.kind]
   const infra = item.kind !== 'unknown'
-  const href = item.kind === 'switch' && item.planned ? `/switches/${item.id}` : infra ? '/overview' : `/devices/${encodeURIComponent(item.id)}`
+  const href = item.kind === 'internet' ? '/traffic' : item.kind === 'switch' && item.planned ? `/switches/${item.id}` : infra ? '/overview' : `/devices/${encodeURIComponent(item.id)}`
   return (
     <div
       className={cn(
@@ -62,49 +62,101 @@ function DeviceNode({ data, selected }: NodeProps<Node<NodeData>>) {
 
 const nodeTypes = { device: DeviceNode }
 
-function layout(nodes: TopologyNode[], edges: TopologyEdge[], showClients: boolean): { nodes: Node<NodeData>[]; edges: Edge[] } {
-  const graph = new dagre.graphlib.Graph()
-  graph.setGraph({ rankdir: 'TB', nodesep: 30, ranksep: 70, marginx: 20, marginy: 20 })
+type RoutedData = { text: string | null; tone: 'accent' | 'warn' | 'danger' | 'client' } & Record<string, unknown>
+
+const edgeText = (edge: TopologyEdge, flipped: boolean) => {
+  if (edge.origin === 'lldp') {
+    const [a, b] = flipped ? [edge.targetPort, edge.sourcePort] : [edge.sourcePort, edge.targetPort]
+    return `${a ?? '?'} ↔ ${b ?? '?'}${edge.speedMbps ? ` · ${formatSpeed(edge.speedMbps)}` : ''}`
+  }
+  if (edge.origin === 'client') return null
+  if (edge.origin === 'wan') return null
+  if (edge.sourcePort) return `port ${edge.sourcePort}`
+  return edge.sourcePortName ? `port ${edge.sourcePortName}` : 'via'
+}
+
+/**
+ * Layered layout (dagre / network simplex): routers on top, switches, then APs and
+ * endpoints. Edge labels are given a size so dagre keeps rank gaps wide enough for
+ * them; the edges themselves are plain step paths between the placed nodes.
+ */
+function layout(nodes: TopologyNode[], edges: TopologyEdge[], showClients: boolean): { nodes: Node<NodeData>[]; edges: Edge<RoutedData>[] } {
+  const graph = new dagre.graphlib.Graph({ multigraph: true })
+  graph.setGraph({ rankdir: 'TB', nodesep: 48, ranksep: 64, edgesep: 24, marginx: 20, marginy: 20, ranker: 'network-simplex' })
   graph.setDefaultEdgeLabel(() => ({}))
   const visibleNodes = nodes.filter((node) => showClients || node.kind !== 'unknown' || edges.some((edge) => edge.origin === 'lldp' && (edge.source === node.id || edge.target === node.id)))
   const ids = new Set(visibleNodes.map((node) => node.id))
   const visibleEdges = edges.filter((edge) => ids.has(edge.source) && ids.has(edge.target))
-  for (const node of visibleNodes) graph.setNode(node.id, { width: node.kind === 'unknown' ? 150 : 190, height: node.danglingTrunks.length ? 66 : 46 })
-  // Routers on top, clients at the bottom: bias the ranking through edge direction.
+  const byId = new Map(nodes.map((node) => [node.id, node]))
+  // Stable order in → stable layout out; dagre keeps the insertion order as its initial ordering.
+  for (const node of [...visibleNodes].sort((a, b) => rank(a.kind) - rank(b.kind) || a.name.localeCompare(b.name)))
+    graph.setNode(node.id, { width: node.kind === 'unknown' ? 150 : 190, height: node.danglingTrunks.length ? 66 : 46 })
+  // Edges always point down the hierarchy so routers end up on top and clients at the bottom.
+  const flipped = new Map<string, boolean>()
   for (const edge of visibleEdges) {
-    const source = nodes.find((node) => node.id === edge.source)
-    const target = nodes.find((node) => node.id === edge.target)
-    const flip = source && target && rank(source.kind) > rank(target.kind)
-    graph.setEdge(flip ? edge.target : edge.source, flip ? edge.source : edge.target)
+    const flip = rank(byId.get(edge.source)?.kind ?? 'unknown') > rank(byId.get(edge.target)?.kind ?? 'unknown')
+    flipped.set(edge.id, flip)
+    const text = edgeText(edge, flip)
+    graph.setEdge(flip ? edge.target : edge.source, flip ? edge.source : edge.target, text ? { width: text.length * 5.6 + 12, height: 18, labelpos: 'c' } : { width: 1, height: 1 }, edge.id)
   }
-  // Disconnected infra still gets a place near the top.
   dagre.layout(graph)
   return {
     nodes: visibleNodes.map((node) => {
       const pos = graph.node(node.id)
       return { id: node.id, type: 'device', position: { x: pos.x - pos.width / 2, y: pos.y - pos.height / 2 }, data: { item: node, vlans: [] } }
     }),
-    edges: visibleEdges.map((edge) => ({
-      id: edge.id,
-      source: edge.source,
-      target: edge.target,
-      type: 'smoothstep',
-      animated: edge.origin === 'lldp' && edge.up,
-      label: edge.origin === 'lldp' ? `${edge.sourcePort ?? '?'} ↔ ${edge.targetPort ?? '?'}${edge.speedMbps ? ` · ${formatSpeed(edge.speedMbps)}` : ''}` : edge.sourcePort ? `port ${edge.sourcePort}` : undefined,
-      labelStyle: { fontSize: 10, fill: 'var(--text-muted)' },
-      labelBgStyle: { fill: 'var(--surface)', fillOpacity: 0.9 },
-      labelBgPadding: [4, 2],
-      style: {
-        stroke: edge.warnings.length ? 'var(--warn)' : !edge.up ? 'var(--danger)' : edge.origin === 'client' ? '#3b465c' : 'var(--accent)',
-        strokeWidth: edge.origin === 'client' ? 1 : 2,
-        strokeDasharray: edge.origin === 'client' ? '3 3' : undefined,
-      },
-      markerEnd: edge.origin === 'client' ? undefined : { type: MarkerType.Arrow, color: edge.warnings.length ? 'var(--warn)' : 'var(--accent)' },
-    })),
+    edges: visibleEdges.map((edge) => {
+      const flip = flipped.get(edge.id) ?? false
+      const tone: RoutedData['tone'] = !edge.up ? 'danger' : edge.warnings.length ? 'warn' : edge.origin === 'client' ? 'client' : 'accent'
+      const stroke = tone === 'warn' ? 'var(--warn)' : tone === 'danger' ? 'var(--danger)' : tone === 'client' ? 'var(--line-strong)' : 'var(--accent)'
+      return {
+        id: edge.id,
+        // Drawn top → down; the inspector still shows the original direction.
+        source: flip ? edge.target : edge.source,
+        target: flip ? edge.source : edge.target,
+        type: 'routed',
+        // Every live link flows; client placements and down links stay still.
+        animated: edge.up && edge.origin !== 'client',
+        data: { text: edgeText(edge, flip), tone },
+        style: {
+          stroke,
+          strokeWidth: edge.origin === 'client' ? 1 : edge.origin === 'fdb' ? 1.5 : 2,
+          strokeDasharray: edge.origin === 'client' || edge.origin === 'fdb' ? '4 3' : undefined,
+        },
+        markerEnd: edge.origin === 'client' ? undefined : { type: MarkerType.Arrow, color: stroke },
+      }
+    }),
   }
 }
 
-const rank = (kind: TopologyNode['kind']) => ({ router: 0, switch: 1, 'access-point': 2, server: 3, computer: 3, media: 3, custom: 3, unknown: 4 })[kind]
+/** Step edge (down, across at the midpoint, down) with the label on the crossbar — dagre only places the nodes. */
+function RoutedEdge({ id, sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition, data, style, markerEnd, selected }: EdgeProps<Edge<RoutedData>>) {
+  const [path, labelX, labelY] = getSmoothStepPath({ sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition, borderRadius: 10 })
+  const text = data?.text ?? null
+  const tone = data?.tone ?? 'accent'
+  return (
+    <>
+      <BaseEdge id={id} path={path} style={style} markerEnd={markerEnd} interactionWidth={16} />
+      {text && (
+        <EdgeLabelRenderer>
+          <div
+            className={cn(
+              'nodrag nopan pointer-events-auto absolute rounded border px-1.5 py-px text-[10px] font-medium leading-4',
+              selected ? 'border-accent bg-accent-soft text-accent-text' : tone === 'warn' ? 'border-warn/50 bg-surface text-warn' : tone === 'danger' ? 'border-danger/50 bg-surface text-danger' : 'border-line bg-surface text-muted',
+            )}
+            style={{ transform: `translate(-50%, -50%) translate(${labelX}px, ${labelY}px)` }}
+          >
+            {text}
+          </div>
+        </EdgeLabelRenderer>
+      )}
+    </>
+  )
+}
+
+const edgeTypes = { routed: RoutedEdge }
+
+const rank = (kind: TopologyNode['kind']) => ({ internet: -1, router: 0, switch: 1, 'access-point': 2, server: 3, computer: 3, media: 3, custom: 3, unknown: 4 })[kind]
 
 export function TopologyPage() {
   const state = useMonitor((store) => store.state)
@@ -113,7 +165,7 @@ export function TopologyPage() {
   const [selectedEdge, setSelectedEdge] = useState<string | null>(null)
   const computed = useMemo(() => (state ? layout(state.topology.nodes, state.topology.edges, showClients) : { nodes: [], edges: [] }), [state, showClients])
   const [nodes, setNodes, onNodesChange] = useNodesState<Node<NodeData>>([])
-  const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([])
+  const [edges, setEdges, onEdgesChange] = useEdgesState<Edge<RoutedData>>([])
   const [autoLayout, setAutoLayout] = useState(true)
 
   useEffect(() => {
@@ -125,6 +177,7 @@ export function TopologyPage() {
         return existing && !autoLayout ? { ...node, position: existing.position } : node
       })
     })
+    // Routed points only make sense at the computed positions; hand-moved graphs get plain step edges.
     setEdges(computed.edges)
   }, [computed, autoLayout, setNodes, setEdges])
 
@@ -175,7 +228,7 @@ export function TopologyPage() {
               <div className="mt-2 flex flex-wrap gap-1.5">
                 <Badge tone={selected.up ? 'ok' : 'danger'}>{selected.up ? 'up' : 'down'}</Badge>
                 {selected.speedMbps && <Badge>{formatSpeed(selected.speedMbps)}</Badge>}
-                <Badge tone="accent">{selected.origin === 'lldp' ? 'LLDP' : selected.origin}</Badge>
+                <Badge tone="accent">{originLabel(selected.origin)}</Badge>
               </div>
               {selected.vlanIds.length > 0 && (
                 <div className="mt-3">
@@ -203,7 +256,7 @@ export function TopologyPage() {
           ) : (
             <div>
               <SectionLabel>Live topology</SectionLabel>
-              <p className="text-[12px] leading-5 text-muted">Blue = LLDP link, amber = config differences, red = down. Dimmed nodes are planned but not in use. Click a link for VLANs and speed.</p>
+              <p className="text-[12px] leading-5 text-muted">Blue = live infrastructure link, dashed = MAC-table location, amber = config differences, red = down. Disabled current-show components are hidden.</p>
             </div>
           )}
           <div>
@@ -233,6 +286,7 @@ export function TopologyPage() {
           nodes={nodes}
           edges={edges}
           nodeTypes={nodeTypes}
+          edgeTypes={edgeTypes}
           onNodesChange={(changes) => {
             if (changes.some((change) => change.type === 'position' && change.dragging)) setAutoLayout(false)
             onNodesChange(changes)
@@ -258,3 +312,10 @@ export function TopologyPage() {
 }
 
 const nameOf = (nodes: TopologyNode[], id: string) => nodes.find((node) => node.id === id)?.name ?? id
+
+const originLabel = (origin: TopologyEdge['origin']) => {
+  if (origin === 'lldp') return 'LLDP'
+  if (origin === 'fdb') return 'MAC table'
+  if (origin === 'wan') return 'WAN uplink'
+  return origin
+}

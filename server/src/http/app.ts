@@ -1,5 +1,5 @@
 import { existsSync, readFileSync } from 'node:fs'
-import { resolve } from 'node:path'
+import { resolve, sep } from 'node:path'
 import express, { type Request, type Response, type NextFunction } from 'express'
 import { z } from 'zod'
 import type { KnownDeviceMeta, ScanScope } from '@shared/types'
@@ -10,7 +10,9 @@ import type { Store } from '../state/store.js'
 import type { Poller } from '../poll/jobs.js'
 import { maskSettings, mergeSettings, saveSettings, settingsSchema, unmaskSettings, writeJsonAtomic } from '../settings.js'
 import { parseInventory } from '../inventory/plan.js'
+import { fetchRemoteInventoryProject, RemoteInventoryError } from '../inventory/remote.js'
 import { LiveChannel } from './sse.js'
+import { trafficHistory } from '../analysis/traffic.js'
 
 const logger = log('http')
 
@@ -152,7 +154,18 @@ export function createApp(ctx: AppContext) {
   })
   api.get('/vlans', (_req, res) => res.json(store.current().vlans))
   api.get('/topology', (_req, res) => res.json(store.current().topology))
+  api.get('/wlan', (_req, res) => res.json(store.current().wlan))
+  api.get('/traffic', (_req, res) => {
+    const traffic = store.current().traffic
+    res.json({ ...traffic, series: trafficHistory(store, traffic) })
+  })
   api.get('/problems', (_req, res) => res.json(store.current().problems))
+  api.post('/problems/:id/resolve', (req, res) => {
+    const result = store.resolveProblem(String(req.params.id))
+    if (!result.ok) return res.status(result.status).json({ error: result.error })
+    store.save(true)
+    res.json({ ok: true, message: result.message })
+  })
 
   api.get('/settings', (_req, res) => res.json(maskSettings(store.settings)))
   api.put('/settings', (req, res) => {
@@ -185,6 +198,29 @@ export function createApp(ctx: AppContext) {
     store.addEvent({ kind: 'system', severity: 'info', message: `Inventory replaced: ${inventory.projectName} (${inventory.devices.length} devices)`, subject: null })
     store.publish()
     res.json({ ok: true, projectName: inventory.projectName, devices: inventory.devices.length })
+  })
+  api.post('/inventory/sync', async (_req, res, next) => {
+    try {
+      const file = resolve(config.dataDir, 'inventory.json')
+      const remote = await fetchRemoteInventoryProject(store.settings.networkConfig)
+      const inventory = parseInventory(remote.project, `${remote.sourceUrl}#revision=${remote.revision ?? 'unknown'}`)
+      writeJsonAtomic(file, remote.project)
+      store.inventory = inventory
+      ctx.onInventoryChanged()
+      const revision = remote.revision !== null ? ` revision ${remote.revision}` : ''
+      store.addEvent({
+        kind: 'system',
+        severity: 'info',
+        message: `Inventory resynced from network config${revision}: ${inventory.projectName} (${inventory.devices.length} devices)`,
+        subject: null,
+      })
+      store.publish()
+      const queued = poller.request('all')
+      res.json({ ok: true, projectName: inventory.projectName, devices: inventory.devices.length, revision: remote.revision, queued })
+    } catch (error) {
+      if (error instanceof RemoteInventoryError) return res.status(error.status).json({ error: error.message })
+      next(error)
+    }
   })
 
   // On-site corrections without re-exporting the plan: patch a planned device's management IP.
@@ -253,8 +289,23 @@ export function createApp(ctx: AppContext) {
 
   // The built UI. During development Vite serves it and proxies /api here.
   if (existsSync(config.webDist)) {
-    app.use(express.static(config.webDist, { index: 'index.html', maxAge: '1h', etag: true }))
-    app.get(/^(?!\/api\/).*/, (_req, res) => res.sendFile(resolve(config.webDist, 'index.html')))
+    // Hashed bundles are immutable; index.html (and the few unhashed files) must always be revalidated,
+    // otherwise a browser keeps pointing at an old bundle for an hour after every deploy.
+    const noStore = (res: express.Response) => res.setHeader('Cache-Control', 'no-cache, must-revalidate')
+    app.use(
+      express.static(config.webDist, {
+        index: false,
+        etag: true,
+        setHeaders: (res, path) => {
+          if (path.includes(`${sep}assets${sep}`)) res.setHeader('Cache-Control', 'public, max-age=31536000, immutable')
+          else noStore(res)
+        },
+      }),
+    )
+    app.get(/^(?!\/api\/).*/, (_req, res) => {
+      noStore(res)
+      res.sendFile(resolve(config.webDist, 'index.html'))
+    })
   } else {
     app.get('/', (_req, res) =>
       res

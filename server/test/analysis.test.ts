@@ -18,10 +18,12 @@ describe('end-to-end analysis on the demo network', () => {
     const { parseInventory } = await import('../src/inventory/plan.js')
     const { defaultSettings } = await import('../src/settings.js')
     const { Store } = await import('../src/state/store.js')
-    const { createDemoTransports } = await import('../src/poll/demo.js')
+    const { createDemoTransports, DEMO_AP_PASSWORD } = await import('../src/poll/demo.js')
     const { Poller } = await import('../src/poll/jobs.js')
     const inventory = parseInventory(JSON.parse(readFileSync(resolve(__dirname, '../../config/inventory.json'), 'utf8')), 'test')
-    const store = new Store(inventory, defaultSettings(), {
+    const settings = defaultSettings()
+    settings.accessPoints.password = DEMO_AP_PASSWORD
+    const store = new Store(inventory, settings, {
       version: 'test',
       mode: 'demo',
       hostname: 'test',
@@ -45,6 +47,8 @@ describe('end-to-end analysis on the demo network', () => {
     for (const id of jobs.filter((id) => id.startsWith('switch-config'))) await run(id)
     for (const id of jobs.filter((id) => id.startsWith('switch-fast') || id.startsWith('switch-tables') || id.startsWith('router-arp') || id.startsWith('sysinfo'))) await run(id)
     for (const id of jobs.filter((id) => id.startsWith('sweep:') || id === 'dns')) await run(id)
+    // Two AP and router-traffic polls: the second one has counters to derive throughput from.
+    for (const round of [0, 1]) for (const id of jobs.filter((id) => id.startsWith('ap:') || id.startsWith('router-traffic:'))) await run(id).then(() => round)
     store.publish()
     // Devices that answered joined the setup automatically; the offline Jakob switch has to be added by hand.
     expect(store.isInUse('switch-foh')).toBe(true)
@@ -66,6 +70,16 @@ describe('end-to-end analysis on the demo network', () => {
     expect(jakob.snmp.ok).toBe(false)
     expect(state.infra.find((item) => item.id === 'switch-stage-b')?.inUseSource).toBe('manual')
     expect(state.infra.find((item) => item.id === 'switch-foh')?.inUseSource).toBe('auto')
+  })
+
+  it('treats the tagged Pi as one host in VLAN 99, not as a VLAN mismatch', () => {
+    const pi = state.devices.find((device) => device.infraId && device.primaryIp === '192.168.99.2')!
+    expect(pi.vlanId).toBe(99)
+    expect(pi.location).toMatchObject({ port: 21 })
+    expect(pi.flags.some((flag) => flag.includes('learned it on VLAN'))).toBe(false)
+    expect(state.problems.some((problem) => problem.code === 'device-vlan-mismatch' && problem.subject.id === pi.id)).toBe(false)
+    // Its planned port is labelled "PI" on the FOH switch, and that is where LLDP sees it.
+    expect(state.problems.some((problem) => problem.code === 'infra-wrong-port')).toBe(false)
   })
 
   it('locates infrastructure through LLDP', () => {
@@ -127,6 +141,53 @@ describe('end-to-end analysis on the demo network', () => {
     expect(audio.onlineDeviceCount).toBeGreaterThanOrEqual(5)
     expect(audio.ports.some((port) => port.switchId === 'switch-foh' && port.port === 9 && !port.tagged)).toBe(true)
     expect(audio.ports.some((port) => port.switchId === 'switch-foh' && port.port === 22 && port.tagged)).toBe(true)
+  })
+  it('measures internet throughput on the router WAN link and per-VLAN edge traffic', () => {
+    expect(state.traffic.wan).not.toBeNull()
+    expect(state.traffic.wan!.interfaces.map((iface) => iface.name)).toEqual(['DSL-1'])
+    expect(state.traffic.wan!.inBps).toBeGreaterThan(0)
+    const wan = state.traffic.series.find((item) => item.kind === 'wan')!
+    expect(wan.samples.length).toBeGreaterThanOrEqual(1)
+    expect(state.traffic.series.some((item) => item.kind === 'router-link')).toBe(true)
+    const audio = state.traffic.series.find((item) => item.id === 'vlan:20')
+    expect(audio?.inBps).not.toBeNull()
+  })
+
+  describe('standalone access points', () => {
+    it('reads radios, SSIDs and clients from the FOH AP through its web API', () => {
+      const foh = state.wlan.accessPoints.find((ap) => ap.ip === '192.168.99.30')!
+      expect(state.wlan.configured).toBe(true)
+      expect(foh.source).toBe('eap')
+      expect(foh.poll?.ok).toBe(true)
+      expect(foh.model).toBe('EAP650')
+      expect(foh.radios.map((radio) => [radio.band, radio.channel])).toEqual([
+        ['2.4 GHz', 6],
+        ['5 GHz', 44],
+      ])
+      expect(state.wlan.ssids.find((ssid) => ssid.ssid === 'ABOUTUS-Control')).toMatchObject({ vlanId: 10, bands: ['2.4 GHz', '5 GHz'] })
+      expect(foh.clients.map((client) => client.hostname).sort()).toEqual(['ipad-manu', 'iphone-manu', 'ma3-onpc-tablet'])
+      // The AP itself is located on the switch, so its clients inherit that entry point.
+      expect(foh.locatedAt).toMatchObject({ switchId: 'switch-foh', port: 22 })
+    })
+
+    it('gives Wi-Fi devices their AP, SSID, signal and the VLAN of the SSID', () => {
+      const phone = state.devices.find((device) => device.hostname?.startsWith('iphone-manu'))!
+      expect(phone.wireless).toMatchObject({ ap: 'AP Manu FOH', ssid: 'ABOUTUS-Control', band: '5 GHz', quality: 'excellent', apLocation: { switchId: 'switch-foh', port: 22 } })
+      expect(phone.sources).toContain('wifi')
+      expect(phone.status).toBe('located')
+      const ipad = state.devices.find((device) => device.hostname?.startsWith('ipad-manu'))!
+      expect(ipad.wireless?.quality).toBe('fair')
+      const wlanClient = state.wlan.clients.find((client) => client.deviceId === phone.id)!
+      expect(wlanClient.rxBps).not.toBeNull()
+      expect(wlanClient.vlanId).toBe(10)
+    })
+
+    it('lists every planned AP with its poll state, even the flapping one', () => {
+      const stage = state.wlan.accessPoints.find((ap) => ap.ip === '192.168.99.31')!
+      expect(stage.poll).not.toBeNull()
+      if (stage.poll!.ok) expect(stage.clients.map((client) => client.hostname)).toContain('video-op-phone')
+      else expect(state.problems.some((problem) => problem.code === 'ap-poll-failed' && problem.subject.id === stage.id) || stage.reachability !== 'online').toBe(true)
+    })
   })
 })
 

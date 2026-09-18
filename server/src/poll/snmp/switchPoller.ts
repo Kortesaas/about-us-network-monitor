@@ -316,10 +316,18 @@ function idToString(value: SnmpVarbind['value'] | null, subtype: number | null):
   return String(value)
 }
 
-/** Bridge port → physical port number, via ifIndex when the switch maps them, else identity. */
+/**
+ * Bridge port → physical port number, via ifIndex when the switch maps them.
+ * TP-Link JetStream numbers its FDB entries by front-panel port (22) while its
+ * bridge-port table and ifIndexes are 49153+, so a value that is itself a known
+ * port number is taken as that port.
+ */
 export function bridgePortToPort(raw: RawSwitch, bridgePort: number): number | null {
   const ifIndex = raw.bridgePortToIfIndex.get(bridgePort) ?? bridgePort
-  return raw.portMap.get(ifIndex) ?? null
+  const viaIfIndex = raw.portMap.get(ifIndex)
+  if (viaIfIndex !== undefined) return viaIfIndex
+  for (const port of raw.portMap.values()) if (port === bridgePort) return bridgePort
+  return null
 }
 
 /** LLDP local port numbers are usually ifIndex; fall back to the LLDP port id/desc, then to bridge ports. */

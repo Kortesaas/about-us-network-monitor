@@ -6,8 +6,9 @@ import type { RawSysInfo } from '../state/raw.js'
 import { Scheduler } from './scheduler.js'
 import type { SnmpSession, SnmpSessionOptions, Transports } from './transport.js'
 import { pollSwitchConfig, pollSwitchFast, pollSwitchTables } from './snmp/switchPoller.js'
-import { pollRouterArp, pollSysInfo } from './snmp/routerPoller.js'
+import { pollRouterArp, pollRouterTraffic, pollSysInfo } from './snmp/routerPoller.js'
 import { pollOmada } from './omada.js'
+import { EapPoller } from './eap.js'
 import { isMonitoredIp } from '../inventory/plan.js'
 import { log } from '../logger.js'
 
@@ -31,11 +32,13 @@ export function resolveSnmp(settings: Settings, device: PlannedDevice): SnmpSess
 export class Poller {
   readonly scheduler = new Scheduler()
   private publishTimer: NodeJS.Timeout | null = null
+  private readonly eap: EapPoller
 
   constructor(
     private readonly store: Store,
     private readonly transports: Transports,
   ) {
+    this.eap = new EapPoller(transports.http)
     this.scheduler.onChange(() => this.schedulePublish(150))
   }
 
@@ -55,6 +58,13 @@ export class Poller {
     const scheduler = this.scheduler
     scheduler.setPoolLimit('snmp', settings.polling.snmpConcurrency)
     scheduler.setPoolLimit('sweep', 1)
+    scheduler.setPoolLimit('eap', 2)
+    // New credentials or timeouts apply at once; a login back-off ends when the user fixes the password.
+    this.eap.reset()
+    if (!settings.accessPoints.enabled) {
+      for (const [id, ap] of this.store.accessPoints) if (ap.source === 'eap') this.store.accessPoints.delete(id)
+      for (const [mac, client] of this.store.wirelessClients) if (client.source === 'eap') this.store.wirelessClients.delete(mac)
+    }
     const wanted = new Set<string>()
     const upsert = (id: string, label: string, intervalMs: number, pool: string | undefined, run: () => Promise<void>, delay: number) => {
       wanted.add(id)
@@ -80,9 +90,14 @@ export class Poller {
         upsert(`sysinfo:${device.id}`, `${device.name}: system info`, s.snmpConfigSeconds * 1000, 'snmp', () => this.sysInfo(device), next())
         if (settings.discovery.routerArp)
           upsert(`router-arp:${device.id}`, `${device.name}: ARP table`, s.routerArpSeconds * 1000, 'snmp', () => this.routerArp(device), next())
-      } else if (device.type === 'access-point' && settings.snmp.targets.some((target) => target.deviceId === device.id && target.enabled)) {
-        // Standalone Omada EAPs have no SNMP agent; only poll APs the user explicitly configured.
-        upsert(`sysinfo:${device.id}`, `${device.name}: system info`, s.snmpConfigSeconds * 1000, 'snmp', () => this.sysInfo(device), next())
+        upsert(`router-traffic:${device.id}`, `${device.name}: WAN throughput`, s.routerTrafficSeconds * 1000, 'snmp', () => this.routerTraffic(device), next())
+      } else if (device.type === 'access-point') {
+        // Standalone Omada EAPs: clients, SSIDs and radios through the AP's own web API.
+        if (settings.accessPoints.enabled && settings.accessPoints.password)
+          upsert(`ap:${device.id}`, `${device.name}: Wi-Fi clients`, settings.accessPoints.intervalSeconds * 1000, 'eap', () => this.accessPoint(device), next())
+        // Their SNMP agent only has MIB-II; poll it only when the user explicitly configured a community.
+        if (settings.snmp.targets.some((target) => target.deviceId === device.id && target.enabled))
+          upsert(`sysinfo:${device.id}`, `${device.name}: system info`, s.snmpConfigSeconds * 1000, 'snmp', () => this.sysInfo(device), next())
       }
     }
 
@@ -104,7 +119,8 @@ export class Poller {
   request(scope: ScanScope): string[] {
     const ids = this.scheduler.request((id) => {
       if (scope === 'all') return id !== 'persist'
-      if (scope === 'infra') return id === 'infra-ping' || id === 'neighbors' || id.startsWith('sysinfo:')
+      if (scope === 'infra') return id === 'infra-ping' || id === 'neighbors' || id.startsWith('sysinfo:') || id.startsWith('ap:') || id.startsWith('router-traffic:')
+      if (scope === 'wlan') return id.startsWith('ap:')
       if (scope === 'switches') return id.startsWith('switch-')
       if (scope === 'sweep') return id.startsWith('sweep:') || id.startsWith('router-arp:') || id === 'neighbors'
       if (scope === 'neighbors') return id === 'neighbors' || id.startsWith('router-arp:')
@@ -250,6 +266,24 @@ export class Poller {
     }
   }
 
+  private async routerTraffic(device: PlannedDevice) {
+    const options = resolveSnmp(this.store.settings, device)
+    if (!options || !this.store.isInUse(device.id)) return
+    const previous = this.store.routerTraffic.get(device.id) ?? null
+    const session = this.transports.snmp.open(options)
+    try {
+      this.store.routerTraffic.set(
+        device.id,
+        await pollRouterTraffic(session, device.id, previous, { explicitWan: this.store.settings.internet.wanInterfaces, rediscoverAfterMs: this.store.settings.polling.snmpConfigSeconds * 1000 }),
+      )
+    } catch (error) {
+      if (previous) this.store.routerTraffic.set(device.id, { ...previous, at: Date.now(), lastError: error instanceof Error ? error.message : String(error) })
+      throw error
+    } finally {
+      session.close()
+    }
+  }
+
   private async sweep(cidr: string) {
     const parsed = parseCidr(cidr)
     if (!parsed) return
@@ -306,6 +340,16 @@ export class Poller {
 
   private async omada() {
     await pollOmada(this.store)
+  }
+
+  private async accessPoint(device: PlannedDevice) {
+    if (!device.managementIp || !this.store.isInUse(device.id)) return
+    const { accessPoints } = this.store.settings
+    await this.eap.poll(
+      { id: device.id, name: device.name, host: device.managementIp },
+      { credentials: { username: accessPoints.username, password: accessPoints.password }, timeoutMs: accessPoints.timeoutMs, detailEvery: accessPoints.detailEvery },
+      this.store,
+    )
   }
 
   /** Which planned subnets does this host have a directly connected interface in? */

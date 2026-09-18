@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
-import { EyeOff, Search, Server, SlidersHorizontal, Star, Wifi, X } from 'lucide-react'
+import { ArrowDown, ArrowUp, ArrowUpDown, ExternalLink, EyeOff, Search, Server, SlidersHorizontal, Star, Wifi, X } from 'lucide-react'
 import type { DeviceState, DeviceStatus } from '@shared/types'
 import { Page } from '@/app/Page'
 import { LoadingState } from '@/components/Loading'
@@ -9,7 +9,22 @@ import { useMonitor } from '@/stores/monitorStore'
 import { cn } from '@/ui/cn'
 import { Badge, Button, EmptyState, Input, Segmented, Select } from '@/ui/kit'
 
-type StatusFilter = 'all' | 'online' | DeviceStatus
+type StatusFilter = 'all' | 'online' | 'clients' | DeviceStatus
+type SortKey = 'name' | 'status' | 'ip' | 'mac' | 'vlan' | 'location' | 'seen'
+
+const statusRank: Record<DeviceStatus, number> = { relocating: 0, located: 1, unlocated: 2, stale: 3, offline: 4 }
+const ipValue = (ip: string | null) => (ip ? ip.split('.').reduce((sum, part) => sum * 256 + Number(part), 0) : Number.POSITIVE_INFINITY)
+const locationText = (device: DeviceState) =>
+  device.location ? `${device.location.switchName} ${String(device.location.port).padStart(3, '0')}` : device.behind ? `${device.behind.name} ${device.behind.devicePort ?? ''}` : device.wireless ? `~${device.wireless.ap}` : '\uffff'
+const comparators: Record<SortKey, (a: DeviceState, b: DeviceState) => number> = {
+  name: (a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }),
+  status: (a, b) => statusRank[a.status] - statusRank[b.status],
+  ip: (a, b) => ipValue(a.primaryIp) - ipValue(b.primaryIp),
+  mac: (a, b) => (a.primaryMac ?? '\uffff').localeCompare(b.primaryMac ?? '\uffff'),
+  vlan: (a, b) => (a.vlanId ?? Number.POSITIVE_INFINITY) - (b.vlanId ?? Number.POSITIVE_INFINITY),
+  location: (a, b) => locationText(a).localeCompare(locationText(b), undefined, { numeric: true }),
+  seen: (a, b) => Date.parse(b.lastSeenAt) - Date.parse(a.lastSeenAt),
+}
 
 export function matchesQuery(device: DeviceState, query: string) {
   if (!query) return true
@@ -31,6 +46,8 @@ export function DevicesPage() {
   const vlan = params.get('vlan') ?? ''
   const sw = params.get('switch') ?? ''
   const known = params.get('known') ?? ''
+  const sortKey = (params.get('sort') as SortKey | null) ?? null
+  const sortDir = params.get('dir') === 'desc' ? 'desc' : 'asc'
   const category = params.get('category') ?? ''
   const [showMacOnly, setShowMacOnly] = useState(false)
   const [showIgnored, setShowIgnored] = useState(false)
@@ -43,16 +60,30 @@ export function DevicesPage() {
     else next.delete(key)
     setParams(next, { replace: true })
   }
+  // Click cycles ascending → descending → back to the default order.
+  const toggleSort = (key: SortKey) => {
+    const next = new URLSearchParams(params)
+    if (sortKey !== key) {
+      next.set('sort', key)
+      next.delete('dir')
+    } else if (sortDir === 'asc') next.set('dir', 'desc')
+    else {
+      next.delete('sort')
+      next.delete('dir')
+    }
+    setParams(next, { replace: true })
+  }
 
   const categories = useMemo(() => [...new Set((state?.devices ?? []).map((device) => device.known?.category).filter((item): item is string => Boolean(item)))].sort(), [state])
 
   const rows = useMemo(() => {
     if (!state) return []
-    return state.devices.filter((device) => {
+    const list = state.devices.filter((device) => {
       if (device.macOnly && !showMacOnly) return false
       if (device.known?.ignored && !showIgnored) return false
       if (device.infraId && !showInfra) return false
-      if (status === 'online' ? !device.online : status !== 'all' && device.status !== status) return false
+      // "Clients" = everything that is not planned infrastructure (switches, router, APs, the Pi).
+      if (status === 'clients' ? device.infraId !== null : status === 'online' ? !device.online : status !== 'all' && device.status !== status) return false
       if (vlan && String(device.vlanId) !== vlan) return false
       if (sw && device.location?.switchId !== sw) return false
       if (known === 'known' && !device.known && !device.infraId) return false
@@ -61,7 +92,10 @@ export function DevicesPage() {
       if (category && device.known?.category !== category) return false
       return matchesQuery(device, query)
     })
-  }, [state, query, status, vlan, sw, known, category, showMacOnly, showIgnored, showInfra])
+    // Without a chosen column the backend order stays (infrastructure, favourites, then by status and IP).
+    if (sortKey) list.sort((a, b) => comparators[sortKey](a, b) * (sortDir === 'desc' ? -1 : 1))
+    return list
+  }, [state, query, status, vlan, sw, known, category, showMacOnly, showIgnored, showInfra, sortKey, sortDir])
 
   if (!state) return <LoadingState />
   const total = state.devices.filter((device) => !device.macOnly && !device.known?.ignored).length
@@ -89,6 +123,7 @@ export function DevicesPage() {
           onChange={(value) => set('status', value === 'online' ? '' : value)}
           options={[
             { value: 'online', label: 'Online' },
+            { value: 'clients', label: 'Clients' },
             { value: 'located', label: 'Located' },
             { value: 'unlocated', label: 'Unlocated' },
             { value: 'stale', label: 'Stale' },
@@ -178,13 +213,13 @@ export function DevicesPage() {
           <table className="w-full text-left text-[12px]">
             <thead className="bg-surface-2 text-2xs uppercase tracking-wider text-faint">
               <tr>
-                <th className="px-3 py-2 font-semibold">Device</th>
-                <th className="px-3 py-2 font-semibold">Status</th>
-                <th className="hidden px-3 py-2 font-semibold md:table-cell">IP</th>
-                <th className="hidden px-3 py-2 font-semibold lg:table-cell">MAC</th>
-                <th className="px-3 py-2 font-semibold">VLAN</th>
-                <th className="hidden px-3 py-2 font-semibold sm:table-cell">Location</th>
-                <th className="hidden px-3 py-2 font-semibold xl:table-cell">Seen</th>
+                <SortHeader label="Device" column="name" sortKey={sortKey} sortDir={sortDir} onToggle={toggleSort} />
+                <SortHeader label="Status" column="status" sortKey={sortKey} sortDir={sortDir} onToggle={toggleSort} />
+                <SortHeader label="IP" column="ip" sortKey={sortKey} sortDir={sortDir} onToggle={toggleSort} className="hidden md:table-cell" />
+                <SortHeader label="MAC" column="mac" sortKey={sortKey} sortDir={sortDir} onToggle={toggleSort} className="hidden lg:table-cell" />
+                <SortHeader label="VLAN" column="vlan" sortKey={sortKey} sortDir={sortDir} onToggle={toggleSort} />
+                <SortHeader label="Location" column="location" sortKey={sortKey} sortDir={sortDir} onToggle={toggleSort} className="hidden sm:table-cell" />
+                <SortHeader label="Seen" column="seen" sortKey={sortKey} sortDir={sortDir} onToggle={toggleSort} className="hidden xl:table-cell" />
               </tr>
             </thead>
             <tbody className="divide-y divide-line">
@@ -229,8 +264,16 @@ function DeviceRow({ device }: { device: DeviceState }) {
         )}
       </td>
       <td className="mono hidden px-3 py-2 text-ink md:table-cell">
-        {device.primaryIp ?? <span className="text-faint">—</span>}
-        {device.ips.length > 1 && <span className="ml-1 text-faint">+{device.ips.length - 1}</span>}
+        <span className="flex items-center gap-1.5">
+          {device.primaryIp ?? <span className="text-faint">—</span>}
+          {device.ips.length > 1 && <span className="text-faint">+{device.ips.length - 1}</span>}
+          {device.primaryIp && (
+            // Straight to the device's own web UI (management page) in a new tab.
+            <a href={`http://${device.primaryIp}/`} target="_blank" rel="noopener noreferrer" onClick={(event) => event.stopPropagation()} className="rounded p-0.5 text-faint hover:bg-surface-2 hover:text-accent-text" title={`Open http://${device.primaryIp}/ in a new tab`} aria-label={`Open web interface of ${device.primaryIp}`}>
+              <ExternalLink size={12} />
+            </a>
+          )}
+        </span>
       </td>
       <td className="mono hidden px-3 py-2 text-muted lg:table-cell">
         {device.primaryMac ?? <span className="text-faint">—</span>}
@@ -245,8 +288,27 @@ function DeviceRow({ device }: { device: DeviceState }) {
             {device.location.switchName} · <span className="tabular font-semibold">{device.location.port}</span>
             {device.location.portName && <span className="text-faint"> {device.location.portName}</span>}
           </Link>
-        ) : device.wireless?.ap ? (
-          <span className="text-muted">Wi-Fi via {device.wireless.ap}</span>
+        ) : device.behind ? (
+          <span className="text-ink" title={device.behind.switchName ? `Enters ${device.behind.switchName} on port ${device.behind.port}${device.behind.portName ? ` (${device.behind.portName})` : ''}` : undefined}>
+            {device.behind.name}
+            {device.behind.devicePort ? (
+              <>
+                {' · '}
+                <span className="tabular font-semibold">{device.behind.devicePort}</span>
+              </>
+            ) : (
+              <span className="text-faint"> · port unknown</span>
+            )}
+          </span>
+        ) : device.wireless ? (
+          <Link to="/wlan" className="text-ink hover:text-accent-text hover:underline">
+            <Wifi size={11} className="mr-1 inline text-faint" />
+            {device.wireless.ap}
+            <span className="text-faint">
+              {device.wireless.ssid && ` · ${device.wireless.ssid}`}
+              {device.wireless.signal !== null && ` · ${device.wireless.signal} dBm`}
+            </span>
+          </Link>
         ) : (
           <span className="text-faint" title={device.online ? 'No switch port could be attributed.' : ''}>
             {device.online ? 'unknown port' : '—'}
@@ -261,3 +323,17 @@ function DeviceRow({ device }: { device: DeviceState }) {
 }
 
 export const statusOptions = Object.entries(deviceStatusLabel) as [DeviceStatus, string][]
+
+/** Column header that cycles ascending → descending → default order. */
+function SortHeader({ label, column, sortKey, sortDir, onToggle, className }: { label: string; column: SortKey; sortKey: SortKey | null; sortDir: 'asc' | 'desc'; onToggle: (key: SortKey) => void; className?: string }) {
+  const active = sortKey === column
+  const Icon = active ? (sortDir === 'asc' ? ArrowUp : ArrowDown) : ArrowUpDown
+  return (
+    <th className={cn('px-3 py-2 font-semibold', className)} aria-sort={active ? (sortDir === 'asc' ? 'ascending' : 'descending') : 'none'}>
+      <button type="button" onClick={() => onToggle(column)} className={cn('group inline-flex items-center gap-1 uppercase tracking-wider hover:text-ink', active && 'text-ink')} title={active ? (sortDir === 'asc' ? 'Sort descending' : 'Default order') : `Sort by ${label.toLowerCase()}`}>
+        {label}
+        <Icon size={11} className={cn(active ? 'opacity-100' : 'opacity-0 group-hover:opacity-60')} />
+      </button>
+    </th>
+  )
+}

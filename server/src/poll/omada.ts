@@ -1,6 +1,7 @@
 import { request as httpsRequest } from 'node:https'
 import { request as httpRequest } from 'node:http'
 import { normalizeMac } from '@shared/mac'
+import { RADIO_BANDS, radioBand } from './eap.js'
 import type { Store } from '../state/store.js'
 import { log } from '../logger.js'
 
@@ -42,9 +43,9 @@ function requestJson(url: string, options: { method?: string; headers?: Record<s
 }
 
 /**
- * Optional: TP-Link Omada controller Open API (v5.9+). Standalone EAPs have
- * no API, so this only fills in Wi-Fi client / radio info when a controller
- * with an Open API client is configured in Settings.
+ * Optional: TP-Link Omada controller Open API (v5.9+) for sites that run a
+ * controller. Standalone EAPs are read directly instead (see eap.ts); both
+ * feed the same `accessPoints` / `wirelessClients` maps, tagged by source.
  */
 export async function pollOmada(store: Store) {
   const cfg = store.settings.omada
@@ -70,35 +71,81 @@ export async function pollOmada(store: Store) {
     const aps = (await fetchJson(`${base}/openapi/v1/${cfg.omadacId}/sites/${cfg.siteId}/aps?page=1&pageSize=100`, { headers })) as { data?: Record<string, unknown>[] }
     const clients = (await fetchJson(`${base}/openapi/v1/${cfg.omadacId}/sites/${cfg.siteId}/clients?page=1&pageSize=1000&filters.active=true`, { headers })) as { data?: Record<string, unknown>[] }
     const now = Date.now()
-    store.accessPoints.clear()
+    for (const [id, ap] of store.accessPoints) if (ap.source === 'omada') store.accessPoints.delete(id)
+    const apNames = new Map<string, string>()
     for (const ap of aps.data ?? []) {
       const mac = normalizeMac(String(ap.mac ?? ''))
       if (!mac) continue
       const radios = (ap.radioTrafficList as Record<string, unknown>[] | undefined) ?? []
+      const name = String(ap.name ?? mac)
+      apNames.set(mac, name)
+      const ssids = ((ap.wirelessLinkedList ?? ap.ssidList) as Record<string, unknown>[] | undefined) ?? []
       store.accessPoints.set(mac, {
+        id: mac,
+        source: 'omada',
         mac,
         ip: typeof ap.ip === 'string' ? ap.ip : null,
-        name: String(ap.name ?? mac),
+        name,
+        model: typeof ap.model === 'string' ? ap.model : null,
+        firmware: typeof ap.firmwareVersion === 'string' ? ap.firmwareVersion : null,
+        hardware: typeof ap.hwVersion === 'string' ? ap.hwVersion : null,
         status: Number(ap.status) === 1 ? 'online' : Number(ap.status) === 0 ? 'offline' : 'unknown',
+        uptimeSeconds: typeof ap.uptimeLong === 'number' ? ap.uptimeLong : null,
+        cpuPercent: typeof ap.cpuUtil === 'number' ? ap.cpuUtil : null,
+        memoryPercent: typeof ap.memUtil === 'number' ? ap.memUtil : null,
+        lanLink: null,
         clients: Number(ap.clientNum ?? 0),
-        ssids: [],
-        radios: radios.map((radio, index) => ({ band: ['2.4 GHz', '5 GHz', '6 GHz'][index] ?? `radio ${index}`, channel: null, clients: Number(radio.clientNum ?? 0) })),
+        ssids: ssids
+          .filter((item) => typeof item.ssid === 'string')
+          .map((item) => ({ ssid: String(item.ssid), radioId: Number(item.radioId ?? 0), vlanId: typeof item.vlanId === 'number' && item.vlanId > 0 ? item.vlanId : null, security: null, guest: item.guestNetEnable === true, portal: false, clients: 0 })),
+        radios: radios.map((radio, index) => ({
+          id: index,
+          band: RADIO_BANDS[index] ?? `radio ${index}`,
+          enabled: true,
+          channel: typeof radio.channel === 'number' ? radio.channel : null,
+          frequencyMhz: null,
+          widthMhz: null,
+          mode: null,
+          txPowerDbm: typeof radio.txPower === 'number' ? radio.txPower : null,
+          maxRateMbps: null,
+          clients: Number(radio.clientNum ?? 0),
+          rxBytes: typeof radio.rx === 'number' ? radio.rx : null,
+          txBytes: typeof radio.tx === 'number' ? radio.tx : null,
+          rxBps: null,
+          txBps: null,
+        })),
         at: now,
+        lastOkAt: now,
+        detailsAt: now,
+        lastError: null,
+        lastDurationMs: null,
       })
     }
-    store.wirelessClients.clear()
+    for (const [mac, client] of store.wirelessClients) if (client.source === 'omada') store.wirelessClients.delete(mac)
     for (const client of clients.data ?? []) {
       const mac = normalizeMac(String(client.mac ?? ''))
       if (!mac || !client.wireless) continue
+      const apMac = normalizeMac(String(client.apMac ?? '')) || null
+      const radioId = typeof client.radioId === 'number' ? client.radioId : null
       store.wirelessClients.set(mac, {
         mac,
+        source: 'omada',
         ip: typeof client.ip === 'string' ? client.ip : null,
         hostname: typeof client.name === 'string' ? client.name : null,
-        apName: typeof client.apName === 'string' ? client.apName : null,
-        apMac: normalizeMac(String(client.apMac ?? '')),
+        apId: apMac ?? 'omada',
+        apName: typeof client.apName === 'string' ? client.apName : (apMac ? (apNames.get(apMac) ?? null) : null),
+        apMac,
         ssid: typeof client.ssid === 'string' ? client.ssid : null,
-        band: client.radioId === 0 ? '2.4 GHz' : client.radioId === 1 ? '5 GHz' : client.radioId === 2 ? '6 GHz' : null,
+        radioId,
+        band: radioBand(radioId),
+        vlanId: typeof client.vid === 'number' && client.vid > 0 ? client.vid : null,
         signal: typeof client.rssi === 'number' ? client.rssi : null,
+        rateMbps: typeof client.rxRate === 'number' ? client.rxRate / 1000 : null,
+        connectedSeconds: typeof client.uptime === 'number' ? client.uptime : null,
+        rxBytes: typeof client.trafficDown === 'number' ? client.trafficDown : null,
+        txBytes: typeof client.trafficUp === 'number' ? client.trafficUp : null,
+        rxBps: null,
+        txBps: null,
         at: now,
       })
     }

@@ -14,6 +14,8 @@ const pages: Item[] = [
   { id: 'p-switches', kind: 'page', label: 'Switches & Ports', to: '/switches', keywords: 'switches ports' },
   { id: 'p-topology', kind: 'page', label: 'Topology', to: '/topology', keywords: 'topology map graph lldp' },
   { id: 'p-vlans', kind: 'page', label: 'VLANs', to: '/vlans', keywords: 'vlans subnets networks' },
+  { id: 'p-wlan', kind: 'page', label: 'WLAN', to: '/wlan', keywords: 'wlan wifi wireless access points ssid clients signal' },
+  { id: 'p-traffic', kind: 'page', label: 'Traffic', to: '/traffic', keywords: 'traffic throughput bandwidth internet wan usage vlan graph' },
   { id: 'p-events', kind: 'page', label: 'Events', to: '/events', keywords: 'events timeline history log' },
   { id: 'p-settings', kind: 'page', label: 'Settings & Inventory', to: '/settings', keywords: 'settings inventory snmp polling export import' },
 ]

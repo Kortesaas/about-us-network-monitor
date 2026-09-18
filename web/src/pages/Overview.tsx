@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { Link } from 'react-router-dom'
-import { AlertTriangle, ArrowRight, Cable, ChevronDown, ChevronRight, Globe, Server, Wifi } from 'lucide-react'
+import { AlertTriangle, ArrowRight, Cable, ChevronDown, ChevronRight, Globe, Server } from 'lucide-react'
 import type { InternetState, Reachability, Summary } from '@shared/types'
 import { Page } from '@/app/Page'
 import { LoadingState } from '@/components/Loading'
@@ -8,20 +8,36 @@ import { InfraCard, UnusedInfraRow } from '@/components/InfraCard'
 import { ProblemRow } from '@/components/ProblemCard'
 import { EventRow } from '@/components/EventRow'
 import { Age, ReachDot, reachLabel } from '@/components/status'
+import { RATE_COLORS, RateChart } from '@/components/RateChart'
+import { isDarkTheme, useThemeStore } from '@/stores/themeStore'
+import { formatBps } from '@/utils/format'
 import { useMonitor } from '@/stores/monitorStore'
 import { cn } from '@/ui/cn'
 import { EmptyState, Panel, type Tone } from '@/ui/kit'
 
 export function OverviewPage() {
   const { state, scan } = useMonitor()
+  const theme = useThemeStore((store) => store.theme)
+  const dark = isDarkTheme(theme)
   const [showUnused, setShowUnused] = useState(false)
   if (!state) return <LoadingState />
-  const { summary, internet } = state
+  const { summary, internet, traffic } = state
   const problems = state.problems.filter((problem) => problem.severity !== 'info')
-  const used = [...state.infra].filter((item) => item.inUse).sort((a, b) => order(a.type) - order(b.type))
+  const used = [...state.infra].filter((item) => item.inUse).sort((a, b) => order(a.type) - order(b.type) || a.name.localeCompare(b.name))
   const unused = state.infra.filter((item) => !item.inUse)
   const scanStatus = scan ?? state.scan
   const tone = { ok: 'bg-ok', degraded: 'bg-warn', critical: 'bg-danger', unknown: 'bg-faint' }[summary.health]
+  const wan = traffic.wan
+  const wanSeries = traffic.series.find((item) => item.kind === 'wan') ?? null
+  const colors = dark ? RATE_COLORS.dark : RATE_COLORS.light
+  const wanPoints = (wanSeries?.samples ?? []).map((sample) => ({ t: Date.parse(sample.t), values: [sample.inBps * 8, sample.outBps * 8] }))
+  const groups = [
+    { label: 'Router', items: used.filter((item) => item.type === 'router') },
+    { label: 'Switches', items: used.filter((item) => item.type === 'switch') },
+    { label: 'Access points', items: used.filter((item) => item.type === 'access-point') },
+    { label: 'Other', items: used.filter((item) => !['router', 'switch', 'access-point'].includes(item.type)) },
+  ].filter((group) => group.items.length)
+  const wifiClients = state.wlan.clients.length
 
   return (
     <Page
@@ -32,119 +48,164 @@ export function OverviewPage() {
         </span>
       }
       description={
-        <span>
-          updated <Age iso={state.generatedAt} />
-          {scanStatus.busy && <span className="text-accent-text"> · {scanStatus.activity}</span>}
+        // One line, fixed height: whatever is happening right now replaces the previous message instead of adding to it.
+        <span className="block h-5 truncate whitespace-nowrap">
+          {scanStatus.busy && scanStatus.activity ? (
+            <span className="text-accent-text">{scanStatus.activity}</span>
+          ) : (
+            <>
+              updated <Age iso={state.generatedAt} />
+            </>
+          )}
         </span>
       }
-      dense
     >
-      <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-5">
-        <Tile to="/overview#infra" label="Infrastructure" value={`${summary.infraOnline}/${summary.infraTotal}`} detail={summary.switchesSnmpOk < summary.switchesTotal ? `${summary.switchesTotal - summary.switchesSnmpOk} switch without SNMP` : 'online'} tone={summary.infraOnline < summary.infraTotal ? 'danger' : 'ok'} icon={<Wifi size={13} />} />
-        <Tile to="/devices" label="Devices" value={summary.devicesOnline} detail={summary.devicesUnlocated ? `${summary.devicesUnlocated} without known port` : `${summary.devicesLocated} located`} icon={<Server size={13} />} />
-        <Tile to="/switches" label="Ports up" value={summary.portsTotal ? summary.portsUp : '—'} detail={summary.portsTotal ? `of ${summary.portsTotal}` : 'no SNMP yet'} icon={<Cable size={13} />} />
+      {/* One row of answers: is the infrastructure up, is the internet up, what is wrong, how many devices. */}
+      <div className="grid grid-cols-2 gap-2 lg:grid-cols-4">
         <Tile
           to="/problems"
           label="Problems"
           value={problems.length}
-          detail={problems.length ? `${summary.problemsCritical} critical · ${summary.problemsWarning} warn` : 'none'}
+          detail={problems.length ? `${summary.problemsCritical} critical · ${summary.problemsWarning} warning` : 'everything matches the plan'}
           tone={summary.problemsCritical ? 'danger' : summary.problemsWarning ? 'warn' : 'ok'}
           icon={<AlertTriangle size={13} />}
+        />
+        <Tile
+          to="/overview#infra"
+          label="Infrastructure"
+          value={`${summary.infraOnline}/${summary.infraTotal}`}
+          detail={summary.infraOnline < summary.infraTotal ? `${summary.infraTotal - summary.infraOnline} not answering` : summary.switchesSnmpOk < summary.switchesTotal ? `${summary.switchesTotal - summary.switchesSnmpOk} switch without SNMP` : 'all online'}
+          tone={summary.infraOnline < summary.infraTotal ? 'danger' : 'ok'}
+          icon={<Cable size={13} />}
         />
         <Tile
           to="/overview#internet"
           label="Internet"
           value={internet.enabled ? reachLabel[internet.status] : 'off'}
-          detail={internet.enabled ? (internet.dns.ok === null ? 'checking DNS…' : internet.dns.ok ? 'DNS ok' : 'DNS failing') : 'check disabled'}
+          detail={wan && wan.inBps !== null ? `↓ ${formatBps(wan.inBps * 8)} · ↑ ${formatBps((wan.outBps ?? 0) * 8)}` : internet.enabled ? (internet.dns.ok === false ? 'DNS failing' : 'DNS ok') : 'check disabled'}
           tone={internetTone(internet)}
           icon={<Globe size={13} />}
         />
+        <Tile to="/devices" label="Devices" value={summary.devicesOnline} detail={`${wifiClients} on Wi-Fi · ${summary.devicesUnlocated ? `${summary.devicesUnlocated} unlocated` : 'all located'}`} icon={<Server size={13} />} />
       </div>
 
-      <div className="mt-3 grid gap-3 xl:grid-cols-[1.4fr_1fr]">
-        <section id="infra" className="min-w-0">
-          <div className="mb-1.5 flex items-center justify-between">
-            <h3 className="text-[12px] font-semibold uppercase tracking-wider text-faint">Infrastructure in use</h3>
-            <Link to="/switches" className="flex items-center gap-1 text-[12px] text-accent-text hover:underline">
-              Port maps <ArrowRight size={12} />
+      <div className="mt-3 grid gap-3 xl:grid-cols-[1fr_1fr]">
+        <Panel
+          title={problems.length ? `Problems (${problems.length})` : 'Problems'}
+          bodyClassName="p-1"
+          actions={
+            <Link to="/problems" className="text-[12px] text-accent-text hover:underline">
+              All
             </Link>
-          </div>
-          {used.length === 0 ? (
-            <Panel>
-              <EmptyState
-                icon={<Server size={24} />}
-                title={state.infra.length === 0 ? 'No planned infrastructure' : 'Nothing in use yet'}
-                description={state.infra.length === 0 ? 'Upload the planner JSON in Settings → Inventory.' : 'Planned devices join automatically as soon as they answer a ping — or pick them below.'}
-              />
-            </Panel>
+          }
+        >
+          {problems.length === 0 ? (
+            <p className="px-2 py-3 text-[12px] text-muted">Everything in use answers and matches the plan.</p>
           ) : (
-            <div className="grid gap-1.5 lg:grid-cols-2">
-              {used.map((item) => (
-                <InfraCard key={item.id} item={item} />
+            <>
+              {problems.slice(0, 5).map((problem) => (
+                <ProblemRow key={problem.id} problem={problem} />
               ))}
-            </div>
+              {problems.length > 5 && (
+                <Link to="/problems" className="block rounded px-2 py-1 text-center text-[11px] text-accent-text hover:bg-surface-2">
+                  {problems.length - 5} more…
+                </Link>
+              )}
+            </>
           )}
-          {unused.length > 0 && (
-            <div className="mt-1.5">
-              <button type="button" onClick={() => setShowUnused((value) => !value)} className="flex items-center gap-1 rounded px-1 py-1 text-[11px] text-faint hover:text-ink">
-                {showUnused ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
-                {unused.length} planned device{unused.length === 1 ? '' : 's'} not in use
-              </button>
-              {showUnused && (
-                <div className="mt-1 grid gap-1.5 lg:grid-cols-2">
-                  {unused.map((item) => (
-                    <UnusedInfraRow key={item.id} item={item} />
+        </Panel>
+
+        <Panel
+          title={
+            <span id="internet" className="flex items-center gap-2">
+              Internet
+              {wan && <span className="font-normal text-faint">{wan.routerName}{wan.interfaces.length ? ` · ${wan.interfaces.map((iface) => iface.name).join(', ')}` : ''}</span>}
+            </span>
+          }
+          bodyClassName="p-3"
+          actions={
+            <Link to="/traffic" className="text-[12px] text-accent-text hover:underline">
+              Traffic
+            </Link>
+          }
+        >
+          <InternetLine internet={internet} />
+          {wan ? (
+            <RateChart className="mt-2" dark={dark} height={110} series={[{ label: 'download', color: colors[0] }, { label: 'upload', color: colors[1] }]} points={wanPoints} emptyText="Collecting WAN samples…" />
+          ) : (
+            <p className="mt-2 text-[11px] text-faint">WAN throughput appears once the router answers SNMP.</p>
+          )}
+        </Panel>
+      </div>
+
+      <section id="infra" className="mt-3">
+        <div className="mb-1.5 flex items-center justify-between">
+          <h3 className="text-[12px] font-semibold uppercase tracking-wider text-faint">Infrastructure in use</h3>
+          <Link to="/switches" className="flex items-center gap-1 text-[12px] text-accent-text hover:underline">
+            Port maps <ArrowRight size={12} />
+          </Link>
+        </div>
+        {used.length === 0 ? (
+          <Panel>
+            <EmptyState
+              icon={<Server size={24} />}
+              title={state.infra.length === 0 ? 'No planned infrastructure' : 'Nothing in use yet'}
+              description={state.infra.length === 0 ? 'Upload the planner JSON in Settings → Inventory.' : 'Planned devices join automatically as soon as they answer a ping — or pick them below.'}
+            />
+          </Panel>
+        ) : (
+          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+            {groups.map((group) => (
+              <div key={group.label} className="min-w-0">
+                <p className="mb-1 text-[11px] font-medium text-faint">
+                  {group.label} <span className="tabular">{group.items.length}</span>
+                </p>
+                <div className="space-y-1.5">
+                  {group.items.map((item) => (
+                    <InfraCard key={item.id} item={item} />
                   ))}
                 </div>
-              )}
-            </div>
-          )}
-
-          <div id="internet" className="mt-3">
-            <h3 className="mb-1.5 text-[12px] font-semibold uppercase tracking-wider text-faint">Internet & DNS</h3>
-            <InternetPanel internet={internet} />
+              </div>
+            ))}
           </div>
-        </section>
-
-        <div className="min-w-0 space-y-3">
-          <Panel
-            title={problems.length ? `Problems (${problems.length})` : 'Problems'}
-            bodyClassName="p-1"
-            actions={
-              <Link to="/problems" className="text-[12px] text-accent-text hover:underline">
-                {state.problems.length > problems.length ? `All ${state.problems.length}` : 'Details'}
-              </Link>
-            }
-          >
-            {problems.length === 0 ? (
-              <p className="px-2 py-2 text-[12px] text-muted">Everything in use answers and matches the plan.</p>
-            ) : (
-              <>
-                {problems.slice(0, 6).map((problem) => (
-                  <ProblemRow key={problem.id} problem={problem} />
+        )}
+        {unused.length > 0 && (
+          <div className="mt-1.5">
+            <button type="button" onClick={() => setShowUnused((value) => !value)} className="flex items-center gap-1 rounded px-1 py-1 text-[11px] text-faint hover:text-ink">
+              {showUnused ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+              {unused.length} planned device{unused.length === 1 ? '' : 's'} not in use
+            </button>
+            {showUnused && (
+              <div className="mt-1 grid gap-1.5 md:grid-cols-2 xl:grid-cols-4">
+                {unused.map((item) => (
+                  <UnusedInfraRow key={item.id} item={item} />
                 ))}
-                {problems.length > 6 && (
-                  <Link to="/problems" className="block rounded px-2 py-1 text-center text-[11px] text-accent-text hover:bg-surface-2">
-                    {problems.length - 6} more…
-                  </Link>
-                )}
-              </>
+              </div>
             )}
-          </Panel>
+          </div>
+        )}
+      </section>
 
-          <Panel
-            title="Recent changes"
-            bodyClassName="p-1"
-            actions={
-              <Link to="/events" className="text-[12px] text-accent-text hover:underline">
-                Timeline
-              </Link>
-            }
-          >
-            {state.events.length === 0 ? <p className="px-2 py-2 text-[12px] text-muted">No events yet.</p> : state.events.slice(0, 7).map((event) => <EventRow key={event.id} event={event} />)}
-          </Panel>
-        </div>
-      </div>
+      <Panel
+        className="mt-3"
+        title="Recent changes"
+        bodyClassName="p-1"
+        actions={
+          <Link to="/events" className="text-[12px] text-accent-text hover:underline">
+            Timeline
+          </Link>
+        }
+      >
+        {state.events.length === 0 ? (
+          <p className="px-2 py-2 text-[12px] text-muted">No events yet.</p>
+        ) : (
+          <div className="grid md:grid-cols-2">
+            {state.events.slice(0, 6).map((event) => (
+              <EventRow key={event.id} event={event} />
+            ))}
+          </div>
+        )}
+      </Panel>
 
       <p className="mt-3 text-[11px] text-faint">
         {state.backend.hostname} · v{state.backend.version} · {state.backend.mode} ·{' '}
@@ -157,36 +218,25 @@ export function OverviewPage() {
   )
 }
 
-function InternetPanel({ internet }: { internet: InternetState }) {
-  if (!internet.enabled) return <p className="rounded-md border border-line bg-surface px-2.5 py-2 text-[12px] text-muted">Internet check is disabled in Settings → Discovery.</p>
-  const rows: { key: string; label: string; sub: string; reachability: Reachability; value: string }[] = internet.targets.map((target) => ({
+/** The three internet checks on one line: ping targets with RTT and DNS. */
+function InternetLine({ internet }: { internet: InternetState }) {
+  if (!internet.enabled) return <p className="text-[12px] text-muted">Internet check is disabled in Settings → Discovery.</p>
+  const dns = internet.dns
+  const items: { key: string; label: string; reachability: Reachability; value: string }[] = internet.targets.map((target) => ({
     key: target.target,
     label: target.label,
-    sub: target.target,
     reachability: target.reachability,
-    value: target.reachability === 'online' && target.rttMs !== null ? `${target.rttMs.toFixed(0)} ms` : target.reachability === 'unknown' ? 'checking…' : reachLabel[target.reachability],
+    value: target.reachability === 'online' && target.rttMs !== null ? `${target.rttMs.toFixed(0)} ms` : target.reachability === 'unknown' ? '…' : reachLabel[target.reachability],
   }))
-  const dns = internet.dns
-  rows.push({
-    key: 'dns',
-    label: 'DNS resolution',
-    sub: dns.host + (dns.resolvers.length ? ` via ${dns.resolvers.join(', ')}` : ''),
-    reachability: dns.ok === null ? 'unknown' : dns.ok ? 'online' : 'offline',
-    value: dns.ok === null ? 'checking…' : dns.ok ? (dns.resolvedTo ?? 'ok') : (dns.error ?? 'failed'),
-  })
+  items.push({ key: 'dns', label: 'DNS', reachability: dns.ok === null ? 'unknown' : dns.ok ? 'online' : 'offline', value: dns.ok === null ? '…' : dns.ok ? 'ok' : (dns.error ?? 'failed') })
   return (
-    <div className="grid gap-1.5 sm:grid-cols-3">
-      {rows.map((row) => (
-        <div key={row.key} className={cn('flex h-10 items-center gap-2 rounded-md border bg-surface px-2', row.reachability === 'offline' ? 'border-danger/50 bg-danger-soft/30' : row.reachability === 'stale' ? 'border-warn/50' : 'border-line')}>
-          <ReachDot value={row.reachability} pulse />
-          <span className="min-w-0 flex-1">
-            <span className="block truncate text-[12px] font-semibold text-ink">{row.label}</span>
-            <span className="mono block truncate text-[10px] text-faint">{row.sub}</span>
-          </span>
-          <span className={cn('mono shrink-0 text-[11px]', row.reachability === 'online' ? 'text-ok' : row.reachability === 'offline' ? 'text-danger' : 'text-muted')} title={row.value}>
-            {row.value.length > 18 ? `${row.value.slice(0, 18)}…` : row.value}
-          </span>
-        </div>
+    <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[12px]">
+      {items.map((item) => (
+        <span key={item.key} className="flex items-center gap-1.5" title={item.key}>
+          <ReachDot value={item.reachability} pulse />
+          <span className="text-ink">{item.label}</span>
+          <span className={cn('mono', item.reachability === 'online' ? 'text-muted' : item.reachability === 'offline' ? 'text-danger' : 'text-faint')}>{item.value.length > 24 ? `${item.value.slice(0, 24)}…` : item.value}</span>
+        </span>
       ))}
     </div>
   )

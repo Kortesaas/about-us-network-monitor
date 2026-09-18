@@ -23,6 +23,7 @@ export const settingsSchema = z.object({
       snmpTablesSeconds: z.number().int().min(30).max(3600).default(120),
       snmpConfigSeconds: z.number().int().min(60).max(86400).default(300),
       routerArpSeconds: z.number().int().min(15).max(3600).default(60),
+      routerTrafficSeconds: z.number().int().min(5).max(3600).default(15),
       neighborSeconds: z.number().int().min(5).max(3600).default(20),
       sweepSeconds: z.number().int().min(60).max(86400).default(180),
       snmpConcurrency: z.number().int().min(1).max(8).default(3),
@@ -63,6 +64,16 @@ export const settingsSchema = z.object({
       }),
     })
     .default({}),
+  accessPoints: z
+    .object({
+      enabled: z.boolean().default(true),
+      username: z.string().default('admin'),
+      password: z.string().default(''),
+      intervalSeconds: z.number().int().min(5).max(3600).default(10),
+      detailEvery: z.number().int().min(1).max(100).default(6),
+      timeoutMs: z.number().int().min(500).max(30000).default(5000),
+    })
+    .default({}),
   omada: z
     .object({
       enabled: z.boolean().default(false),
@@ -75,6 +86,15 @@ export const settingsSchema = z.object({
       intervalSeconds: z.number().int().min(15).default(60),
     })
     .default({}),
+  networkConfig: z
+    .object({
+      enabled: z.boolean().default(true),
+      baseUrl: z.string().trim().url().default('https://aboutusmediashare.de/network-config'),
+      username: z.string().default('admin'),
+      password: z.string().default(''),
+      timeoutMs: z.number().int().min(1000).max(60000).default(15000),
+    })
+    .default({}),
   syslog: z
     .object({
       enabled: z.boolean().default(false),
@@ -85,6 +105,7 @@ export const settingsSchema = z.object({
     .object({
       enabled: z.boolean().default(true),
       targets: z.array(z.string()).default(['1.1.1.1', '8.8.8.8']),
+      wanInterfaces: z.array(z.string()).default([]),
       dnsCheckHost: z.string().default('cloudflare.com'),
       intervalSeconds: z.number().int().min(10).max(3600).default(30),
     })
@@ -160,7 +181,9 @@ export function maskSettings(settings: Settings): Settings {
         Object.entries(settings.snmp.defaultCommunities).map(([key, value]) => [key, value ? SECRET : '']),
       ),
     },
+    accessPoints: { ...settings.accessPoints, password: settings.accessPoints.password ? SECRET : '' },
     omada: { ...settings.omada, clientSecret: settings.omada.clientSecret ? SECRET : '' },
+    networkConfig: { ...settings.networkConfig, password: settings.networkConfig.password ? SECRET : '' },
   }
 }
 
@@ -180,9 +203,17 @@ export function unmaskSettings(incoming: Settings, current: Settings): Settings 
   return {
     ...incoming,
     snmp: { ...incoming.snmp, targets, defaultCommunities },
+    accessPoints: {
+      ...incoming.accessPoints,
+      password: incoming.accessPoints.password === SECRET ? current.accessPoints.password : incoming.accessPoints.password,
+    },
     omada: {
       ...incoming.omada,
       clientSecret: incoming.omada.clientSecret === SECRET ? current.omada.clientSecret : incoming.omada.clientSecret,
+    },
+    networkConfig: {
+      ...incoming.networkConfig,
+      password: incoming.networkConfig.password === SECRET ? current.networkConfig.password : incoming.networkConfig.password,
     },
   }
 }

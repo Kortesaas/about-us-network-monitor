@@ -24,7 +24,10 @@ export function VlansPage() {
         </Panel>
       </Page>
     )
-  const anySnmp = state.switches.some((sw) => sw.snmp.ok)
+  // Only switches in this setup: planned-but-unused hardware would just show empty planned faces.
+  const inUse = new Set(state.infra.filter((item) => item.inUse).map((item) => item.id))
+  const switches = state.switches.filter((sw) => inUse.has(sw.id))
+  const anySnmp = switches.some((sw) => sw.snmp.ok)
 
   return (
     <Page title="VLANs" description="Planned VLANs, checked against what the switches carry.">
@@ -32,7 +35,7 @@ export function VlansPage() {
         <div className="space-y-1.5">
           {state.vlans.map((vlan) => {
             // Only VLANs with a planned subnet are expected everywhere; WAN passthrough VLANs live on a few ports.
-            const missing = anySnmp && vlan.planned && vlan.subnet ? vlan.presentOn.filter((item) => !item.present && state.switches.find((sw) => sw.id === item.switchId)?.snmp.ok).length : 0
+            const missing = anySnmp && vlan.planned && vlan.subnet ? vlan.presentOn.filter((item) => !item.present && switches.find((sw) => sw.id === item.switchId)?.snmp.ok).length : 0
             const active = selected?.vlanId === vlan.vlanId
             return (
               <button
@@ -92,8 +95,8 @@ export function VlansPage() {
                 <div>
                   <p className="mb-1 text-2xs font-semibold uppercase tracking-wider text-faint">Configured on</p>
                   <ul className="space-y-1 text-[12px]">
-                    {selected.presentOn.map((item) => {
-                      const sw = state.switches.find((candidate) => candidate.id === item.switchId)
+                    {selected.presentOn.filter((item) => inUse.has(item.switchId)).map((item) => {
+                      const sw = switches.find((candidate) => candidate.id === item.switchId)
                       const known = sw?.snmp.ok && (sw.vlans.length > 0)
                       return (
                         <li key={item.switchId} className="flex items-center gap-2">
@@ -111,7 +114,7 @@ export function VlansPage() {
             </Panel>
 
             <Panel title={`Ports carrying VLAN ${selected.vlanId}`} bodyClassName="p-0">
-              {state.switches.map((sw) => {
+              {switches.map((sw) => {
                 const ports = new Set(selected.ports.filter((port) => port.switchId === sw.id).map((port) => port.port))
                 if (ports.size === 0) return null
                 const tagged = selected.ports.filter((port) => port.switchId === sw.id && port.tagged).length

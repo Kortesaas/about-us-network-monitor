@@ -49,6 +49,8 @@ export type PlannedPort = {
   taggedVlanIds: number[]
   poe: boolean
   speed: string
+  /** Free text from the planner naming what is patched here (device id or name). */
+  connectedDevice: string
 }
 
 /** A device from the planning JSON: what *should* be on the network. */
@@ -277,11 +279,16 @@ export type DeviceState = {
   primaryMac: string | null
   ips: string[]
   primaryIp: string | null
-  /** VLAN derived from the IP subnet (planned) or from the FDB. */
+  /** VLAN derived from the IP subnet (planned), from the FDB, or from the SSID the AP maps to a VLAN. */
   vlanId: number | null
-  vlanSource: 'subnet' | 'fdb' | null
+  vlanSource: 'subnet' | 'fdb' | 'ssid' | null
   location: DeviceLocation | null
   previousLocation: DeviceLocation | null
+  /**
+   * Not on a switch port but on another infra device's port (e.g. the router's LAN ports): the device,
+   * its port name when its MAC table says so, and the switch trunk the traffic enters on (if any).
+   */
+  behind: { infraId: string; name: string; devicePort: string | null; switchId: string | null; switchName: string | null; port: number | null; portName: string | null } | null
   /** Inventory id when this is a planned infra device. */
   infraId: string | null
   known: KnownDeviceMeta | null
@@ -291,11 +298,174 @@ export type DeviceState = {
   lastConfirmedAt: string | null
   rttMs: number | null
   /** Where we learned about it. */
-  sources: ('ping' | 'arp' | 'neighbor' | 'fdb' | 'lldp' | 'dns' | 'omada' | 'inventory')[]
+  sources: ('ping' | 'arp' | 'neighbor' | 'fdb' | 'lldp' | 'dns' | 'wifi' | 'omada' | 'inventory')[]
   /** MAC-only observations are correlation data, never "healthy devices". */
   macOnly: boolean
-  wireless: { ap: string | null; ssid: string | null; band: string | null; signal: number | null } | null
+  /** Wi-Fi association when an AP data source (standalone EAP or Omada) reports this device. */
+  wireless: DeviceWireless | null
   flags: string[]
+}
+
+export type DeviceWireless = {
+  /** Planned AP id (or AP MAC when the AP is not in the plan). */
+  apId: string
+  ap: string
+  ssid: string | null
+  band: string | null
+  /** dBm as reported by the AP. */
+  signal: number | null
+  quality: SignalQuality | null
+  rateMbps: number | null
+  /** The AP's own switch port: where this Wi-Fi device effectively enters the wired network. */
+  apLocation: { switchId: string; switchName: string; port: number } | null
+}
+
+export type SignalQuality = 'excellent' | 'good' | 'fair' | 'poor'
+
+/* ----------------------------------------------------------- traffic */
+
+export type TrafficSample = { t: string; inBps: number; outBps: number }
+
+export type TrafficSeries = {
+  /** `wan`, `router-link`, `vlan:<id>` */
+  id: string
+  kind: 'wan' | 'router-link' | 'vlan'
+  label: string
+  /** What "in" and "out" mean for this series, from the reader's point of view. */
+  inLabel: string
+  outLabel: string
+  vlanId: number | null
+  color: string | null
+  /** Current rate (null until two counter samples exist). */
+  inBps: number | null
+  outBps: number | null
+  /** VLAN series: access ports with link that were summed (0 = nothing wired in this VLAN right now). */
+  activePorts: number | null
+  /** VLAN series: Wi-Fi clients whose SSID maps to this VLAN, added from the APs' per-client counters. */
+  wifiClients: number | null
+  /** Where the series is measured. */
+  source: string | null
+  /** Most recent samples (a short window; `/api/traffic` has the full history). */
+  samples: TrafficSample[]
+}
+
+export type TrafficState = {
+  /** Internet throughput as measured on the router's WAN interface(s). */
+  wan: {
+    routerId: string
+    routerName: string
+    interfaces: { name: string; up: boolean; inBps: number | null; outBps: number | null }[]
+    /** Sum over the WAN interfaces. */
+    inBps: number | null
+    outBps: number | null
+    at: string
+    error: string | null
+  } | null
+  series: TrafficSeries[]
+  /** Seconds between samples of the WAN series. */
+  wanIntervalSeconds: number
+  /** How far back the history reaches. */
+  historySeconds: number
+}
+
+/* -------------------------------------------------------------- wlan */
+
+export type WlanRadio = {
+  id: number
+  band: string
+  enabled: boolean
+  channel: number | null
+  frequencyMhz: number | null
+  widthMhz: number | null
+  mode: string | null
+  txPowerDbm: number | null
+  maxRateMbps: number | null
+  clients: number
+  rxBytes: number | null
+  txBytes: number | null
+  /** Bytes per second since the previous sample (null until two samples exist). */
+  rxBps: number | null
+  txBps: number | null
+}
+
+export type WlanSsid = {
+  ssid: string
+  radioId: number
+  band: string
+  /** 0 / null = untagged on the AP's management network. */
+  vlanId: number | null
+  security: string | null
+  guest: boolean
+  portal: boolean
+  clients: number
+}
+
+export type WlanClient = {
+  mac: string
+  /** Matching device in the Devices list, when the MAC has been correlated. */
+  deviceId: string | null
+  name: string
+  hostname: string | null
+  ip: string | null
+  vlanId: number | null
+  apId: string
+  apName: string
+  ssid: string | null
+  radioId: number | null
+  band: string | null
+  signal: number | null
+  quality: SignalQuality | null
+  rateMbps: number | null
+  connectedSeconds: number | null
+  rxBytes: number | null
+  txBytes: number | null
+  rxBps: number | null
+  txBps: number | null
+  lastSeenAt: string
+}
+
+export type WlanAccessPoint = {
+  id: string
+  name: string
+  model: string | null
+  manufacturer: string | null
+  ip: string | null
+  mac: string | null
+  firmware: string | null
+  hardware: string | null
+  /** Whether this planned AP is part of the current setup (see InfraState.inUse). */
+  inUse: boolean
+  reachability: Reachability
+  uptimeSeconds: number | null
+  cpuPercent: number | null
+  memoryPercent: number | null
+  lanLink: string | null
+  source: 'eap' | 'omada' | null
+  /** Result of the last data poll: null when no AP data source applies to this AP. */
+  poll: { ok: boolean; at: string | null; lastOkAt: string | null; error: string | null; durationMs: number | null } | null
+  locatedAt: { switchId: string; switchName: string; port: number } | null
+  /** When not on a switch port: the device and port it hangs on (e.g. the router's ETH-3). */
+  attachedTo: string | null
+  radios: WlanRadio[]
+  ssids: WlanSsid[]
+  clients: WlanClient[]
+}
+
+export type WlanSsidSummary = {
+  ssid: string
+  vlanId: number | null
+  /** AP ids broadcasting this SSID. */
+  apIds: string[]
+  bands: string[]
+  clients: number
+}
+
+export type WlanState = {
+  accessPoints: WlanAccessPoint[]
+  ssids: WlanSsidSummary[]
+  clients: WlanClient[]
+  /** Whether any AP data source is configured (standalone EAP credentials or an Omada controller). */
+  configured: boolean
 }
 
 /* ---------------------------------------------------------- internet */
@@ -349,7 +519,8 @@ export type VlanState = {
 
 export type TopologyNode = {
   id: string
-  kind: DeviceKind | 'unknown'
+  /** `internet` is the synthetic root: the WAN side of the router. */
+  kind: DeviceKind | 'unknown' | 'internet'
   name: string
   subtitle: string
   ip: string | null
@@ -371,8 +542,8 @@ export type TopologyEdge = {
   target: string
   targetPort: number | null
   targetPortName: string | null
-  /** lldp = seen live, planned = expected from the inventory, client = a located device. */
-  origin: 'lldp' | 'planned' | 'client'
+  /** lldp = seen live, fdb = learned from a switch MAC table, planned = expected from inventory, client = a located device. */
+  origin: 'lldp' | 'fdb' | 'planned' | 'client' | 'wan'
   up: boolean
   speedMbps: number | null
   vlanIds: number[]
@@ -408,6 +579,7 @@ export type EventKind =
   | 'device-offline'
   | 'device-new'
   | 'device-moved'
+  | 'device-roamed'
   | 'port-up'
   | 'port-down'
   | 'infra-online'
@@ -477,6 +649,7 @@ export type Settings = {
     snmpConfigSeconds: number
     /** Router ARP table. */
     routerArpSeconds: number
+    routerTrafficSeconds: number
     /** Local neighbour table (ip neigh). */
     neighborSeconds: number
     /** Per-subnet ping sweep. */
@@ -516,6 +689,16 @@ export type Settings = {
     /** Community used for planned devices without an explicit target, by manufacturer. */
     defaultCommunities: Record<string, string>
   }
+  /** Standalone TP-Link Omada EAPs, read through their own web UI API (no controller needed). */
+  accessPoints: {
+    enabled: boolean
+    username: string
+    password: string
+    intervalSeconds: number
+    /** Device, radio and traffic details are refreshed every N client polls. */
+    detailEvery: number
+    timeoutMs: number
+  }
   omada: {
     enabled: boolean
     baseUrl: string
@@ -526,6 +709,13 @@ export type Settings = {
     insecureTls: boolean
     intervalSeconds: number
   }
+  networkConfig: {
+    enabled: boolean
+    baseUrl: string
+    username: string
+    password: string
+    timeoutMs: number
+  }
   syslog: {
     enabled: boolean
     port: number
@@ -534,6 +724,8 @@ export type Settings = {
     enabled: boolean
     /** Pinged in parallel; WAN counts as up when any answers. */
     targets: string[]
+    /** Router interface names that carry the internet uplink; empty = detect (DSL/WAN/PPPoE/LTE names). */
+    wanInterfaces: string[]
     /** Hostname resolved through the Pi's configured DNS to prove DNS works end to end. */
     dnsCheckHost: string
     intervalSeconds: number
@@ -606,6 +798,8 @@ export type MonitorState = {
   switches: SwitchState[]
   devices: DeviceState[]
   topology: { nodes: TopologyNode[]; edges: TopologyEdge[] }
+  wlan: WlanState
+  traffic: TrafficState
   problems: Problem[]
   events: MonitorEvent[]
   plannedDevices: PlannedDevice[]
@@ -621,4 +815,4 @@ export type LiveMessage =
   | { type: 'event'; event: MonitorEvent }
   | { type: 'ping' }
 
-export type ScanScope = 'all' | 'infra' | 'switches' | 'sweep' | 'neighbors' | `switch:${string}`
+export type ScanScope = 'all' | 'infra' | 'switches' | 'sweep' | 'neighbors' | 'wlan' | `switch:${string}`

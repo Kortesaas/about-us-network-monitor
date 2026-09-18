@@ -8,11 +8,12 @@ import { loadSettings } from './settings.js'
 import { loadInventory } from './inventory/plan.js'
 import { Store } from './state/store.js'
 import { Poller } from './poll/jobs.js'
-import { createDemoTransports } from './poll/demo.js'
+import { createDemoTransports, DEMO_AP_PASSWORD } from './poll/demo.js'
 import { createPingTransport, which } from './poll/ping.js'
 import { createNeighborSource, localInterfaces } from './poll/neighbors.js'
 import { SystemDnsResolver } from './poll/dns.js'
 import { NetSnmpTransport } from './poll/snmp/client.js'
+import { createHttpClient } from './poll/eap.js'
 import { SyslogReceiver } from './poll/syslog.js'
 import type { Transports } from './poll/transport.js'
 import { createApp } from './http/app.js'
@@ -25,6 +26,8 @@ async function main() {
 
   const settings = loadSettings()
   const inventory = loadInventory()
+  // The simulated EAPs accept a fixed password so the WLAN page works out of the box in demo mode.
+  if (config.mode === 'demo' && !settings.accessPoints.password) settings.accessPoints.password = DEMO_AP_PASSWORD
 
   const transports: Transports =
     config.mode === 'demo'
@@ -34,6 +37,7 @@ async function main() {
           neighbors: await createNeighborSource(),
           snmp: new NetSnmpTransport(),
           dns: new SystemDnsResolver(),
+          http: createHttpClient(),
           interfaces: localInterfaces,
         }
 

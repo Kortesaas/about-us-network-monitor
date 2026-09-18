@@ -1,4 +1,4 @@
-import type { DeviceState, InfraState, InternetState, Problem, ProblemSeverity, SwitchState, VlanState } from '@shared/types'
+import type { DeviceState, InfraState, InternetState, Problem, ProblemSeverity, SwitchState, VlanState, WlanState } from '@shared/types'
 import type { Store } from '../state/store.js'
 import { isApTrunk } from './switches.js'
 import { plannedSpeedMbps } from '../poll/snmp/vendor.js'
@@ -26,6 +26,7 @@ export function buildProblems(
   devices: DeviceState[],
   vlans: VlanState[],
   internet: InternetState,
+  wlan: WlanState,
   now: number,
 ): Problem[] {
   const drafts: Draft[] = []
@@ -79,6 +80,72 @@ export function buildProblems(
             : 'Optional for this device type. Enable SNMP on it or disable the target in Settings to silence this.',
         subject,
       })
+  }
+
+  /* ---- planned patching: an infra device whose planned port names it (planner "connected device" or port label) ---- */
+  const firstWords = new Map<string, number>()
+  for (const device of store.inventory.devices) {
+    const word = device.name.trim().split(/\s+/)[0]?.toLowerCase() ?? ''
+    if (word) firstWords.set(word, (firstWords.get(word) ?? 0) + 1)
+  }
+  const plannedPortFor = (deviceId: string, name: string) => {
+    const lower = name.trim().toLowerCase()
+    const word = lower.split(/\s+/)[0] ?? ''
+    for (const sw of switches)
+      for (const port of sw.ports) {
+        if (!port.planned) continue
+        const connected = port.planned.connectedDevice.trim().toLowerCase()
+        const label = port.planned.name.trim().toLowerCase()
+        if ((connected && (connected === deviceId.toLowerCase() || connected === lower)) || (label && (label === lower || (label === word && word.length >= 2 && firstWords.get(word) === 1))))
+          return { switchId: sw.id, switchName: sw.name, port: port.number, label: port.planned.name }
+      }
+    return null
+  }
+  for (const item of infra) {
+    if (!item.inUse || !item.locatedAt) continue
+    const planned = plannedPortFor(item.id, item.name)
+    if (!planned || (planned.switchId === item.locatedAt.switchId && planned.port === item.locatedAt.port)) continue
+    add({
+      id: `infra-wrong-port:${item.id}`,
+      code: 'infra-wrong-port',
+      severity: 'warning',
+      title: `${item.name} is on ${item.locatedAt.switchName} port ${item.locatedAt.port}, planned ${planned.switchName} port ${planned.port}`,
+      detail: `The plan reserves ${planned.switchName} port ${planned.port} ("${planned.label}") for it. On another port it may miss the VLANs it needs.`,
+      suggestion: `Patch ${item.name} to ${planned.switchName} port ${planned.port}, or update the plan if this is intentional.`,
+      subject: { type: 'infra' as const, id: item.id, label: item.name, href: `/switches/${item.locatedAt.switchId}?port=${item.locatedAt.port}` },
+    })
+  }
+
+  /* ---- this Pi: every address must belong to a planned subnet ---- */
+  for (const iface of store.backend.interfaces)
+    if (iface.vlanId === null && !iface.ip.startsWith('127.') && !iface.ip.startsWith('169.254.'))
+      add({
+        id: `pi-unplanned-ip:${iface.name}`,
+        code: 'pi-unplanned-ip',
+        severity: 'warning',
+        title: `The Pi has an address outside the plan: ${iface.cidr} on ${iface.name}`,
+        detail: 'No planned subnet contains this address, so the monitor cannot tell which VLAN this interface is in.',
+        suggestion: 'Fix the interface configuration (see docs/deployment.md) or add the subnet to the plan.',
+        subject: { type: 'system' as const, id: 'pi', label: 'Pi', href: '/settings#discovery' },
+      })
+
+  /* ---- access points ---- */
+  for (const ap of wlan.accessPoints) {
+    // Only planned APs in the setup, only after a poll actually failed, and only while the AP itself answers pings.
+    if (!ap.inUse || !ap.poll || ap.poll.ok || !ap.poll.at || ap.reachability === 'offline') continue
+    const error = ap.poll.error ?? 'unknown error'
+    const auth = /login|password/i.test(error)
+    add({
+      id: `ap-poll-failed:${ap.id}`,
+      code: 'ap-poll-failed',
+      severity: auth ? 'warning' : 'info',
+      title: `No Wi-Fi data from ${ap.name}`,
+      detail: `${error}.${ap.poll.lastOkAt ? ` Last successful read at ${clock(ap.poll.lastOkAt)}.` : ' No successful read yet.'} Devices on this AP show no SSID or signal and may appear unlocated.`,
+      suggestion: auth
+        ? 'Check the access point username/password under Settings → Integrations. The monitor waits 10 minutes after a rejected login so it never locks the AP; saving the settings retries at once.'
+        : 'The AP answers pings but not its web API — it may be rebooting, adopted by a controller (then use the Omada integration), or not a standalone Omada EAP.',
+      subject: { type: 'infra', id: ap.id, label: ap.name, href: '/wlan' },
+    })
   }
 
   /* ---- internet ---- */
@@ -208,10 +275,10 @@ export function buildProblems(
         add({
           id: `uplink-down:${sw.id}:${port.number}`,
           code: 'uplink-down',
-          severity: 'critical',
+          severity: 'warning',
           title: `Trunk ${sw.name} port ${port.number}${label ? ` (${label})` : ''} lost link`,
           detail: 'This trunk had link earlier in this setup and lost it. Everything behind it is cut off.',
-          suggestion: 'Check the cable and the far end. If it was unplugged on purpose, start a new setup in Settings to clear it.',
+          suggestion: 'Check the cable and the far end. If it was unplugged on purpose, click Resolve to accept it for this setup.',
           subject,
         })
       if (isApTrunk(planned) && port.link && !port.link.operUp && seenUp)
@@ -221,7 +288,7 @@ export function buildProblems(
           severity: 'warning',
           title: `AP port ${sw.name} ${port.number} lost link`,
           detail: 'The access point on this port had link earlier in this setup and lost it — no Wi-Fi from it.',
-          suggestion: 'Check PoE and the cable to the AP.',
+          suggestion: 'Check PoE and the cable to the AP. If it was unplugged on purpose, click Resolve to accept it for this setup.',
           subject,
         })
       if (port.lldp.length && planned?.mode === 'access' && port.lldp.some((n) => /switch|router/i.test(n.sysDescription) || n.deviceId))
@@ -235,15 +302,40 @@ export function buildProblems(
           subject,
         })
       if (port.rates && port.rates.errorsPerMin > thresholds.portErrorsPerMinute)
-        add({
-          id: `port-errors:${sw.id}:${port.number}`,
-          code: 'port-errors',
-          severity: port.uplink ? 'critical' : 'warning',
-          title: `Errors increasing on ${sw.name} port ${port.number}${label ? ` (${label})` : ''}`,
-          detail: `${port.rates.errorsPerMin.toFixed(1)} errors/discards per minute. ${port.uplink ? 'This is an uplink — every VLAN behind it suffers.' : ''}`.trim(),
-          suggestion: 'Reseat or replace the cable, check for a duplex mismatch and look at the far-end device.',
-          subject,
-        })
+        {
+          // Discards with clean CRC/error counters are a configuration problem, not a cable: the switch
+          // receives valid frames and drops them on ingress — almost always tagged VLANs the port is not a member of.
+          const counters = port.counters
+          const onlyDiscards = counters !== null && counters.inErrors + counters.outErrors === 0 && counters.inDiscards + counters.outDiscards > 0
+          const silent = port.macs.length === 0 && port.lldp.length === 0
+          const trunkLike = planned?.mode === 'trunk' || planned?.mode === 'hybrid' || port.uplink
+          // A switch whose only live port is this one has nowhere to flood broadcast/multicast to and counts
+          // every such frame as discarded (seen on the T1600G): expected, and gone as soon as a second port has link.
+          const lonely = onlyDiscards && sw.ports.filter((item) => item.link?.operUp).length === 1
+          add({
+            id: `port-errors:${sw.id}:${port.number}`,
+            code: 'port-errors',
+            severity: lonely ? 'info' : port.uplink || trunkLike ? 'critical' : 'warning',
+            title: lonely
+              ? `${sw.name} discards flooded traffic on port ${port.number}${label ? ` (${label})` : ''} — nothing else is plugged in`
+              : onlyDiscards
+                ? `${sw.name} port ${port.number}${label ? ` (${label})` : ''} is discarding incoming frames`
+                : `Errors increasing on ${sw.name} port ${port.number}${label ? ` (${label})` : ''}`,
+            detail: lonely
+              ? `${port.rates.errorsPerMin.toFixed(0)} frames/min: broadcast and multicast arriving on the uplink have no other port to go to while this is the switch's only active link. No errors, nothing is lost that anyone is waiting for.`
+              : onlyDiscards
+                ? `${port.rates.errorsPerMin.toFixed(0)} frames/min dropped on ingress, no CRC errors${silent ? ', and no MAC has been learned on this port — everything that arrives is thrown away' : ''}. ${trunkLike ? 'On a trunk that usually means tagged VLANs the port is not a member of.' : 'Usually tagged frames on an access port, or a VLAN the port is not a member of.'}`
+                : `${port.rates.errorsPerMin.toFixed(1)} errors/discards per minute. ${port.uplink ? 'This is an uplink — every VLAN behind it suffers.' : ''}`.trim(),
+            suggestion: lonely
+              ? 'Nothing to do. This turns into a real check once a device is connected to the switch.'
+              : onlyDiscards
+                ? trunkLike
+                  ? `Compare the VLAN membership of this port with the far end: it should carry ${planned ? [planned.nativeVlanId !== null ? `${planned.nativeVlanId} untagged` : null, planned.taggedVlanIds.length ? `${planned.taggedVlanIds.join(', ')} tagged` : null].filter(Boolean).join(' and ') || 'the planned VLANs' : 'the same VLANs as the far end'}. If the switch's MAC table shows this port learning in every VLAN, the membership is fine and the discards are flooded frames with no receiver.`
+                  : 'Check what is plugged in and whether it sends tagged frames; set the port mode and VLAN to match.'
+                : 'Reseat or replace the cable, check for a duplex mismatch and look at the far-end device.',
+            subject,
+          })
+        }
       if (port.link?.operUp && planned?.speed && port.link.speedMbps) {
         const expected = plannedSpeedMbps(planned.speed)
         if (expected && port.link.speedMbps < expected && port.link.speedMbps <= 100)
@@ -270,7 +362,7 @@ export function buildProblems(
       list.push(device)
       ipClaims.set(ip, list)
     }
-    if (device.online && device.location && device.vlanId !== null && device.location.vlanId !== null && device.vlanSource === 'subnet' && device.location.vlanId !== device.vlanId)
+    if (device.online && device.location && device.vlanId !== null && device.location.vlanId !== null && device.vlanSource === 'subnet' && device.location.vlanId !== device.vlanId && device.flags.some((flag) => flag.includes('the switch learned it on VLAN')))
       add({
         id: `vlan-mismatch:${device.id}`,
         code: 'device-vlan-mismatch',

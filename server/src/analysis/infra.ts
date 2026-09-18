@@ -17,7 +17,8 @@ export function buildInfra(store: Store, switches: SwitchState[], devices: Devic
       const sys = store.sysInfo.get(planned.id) ?? null
       const device = deviceByInfra.get(planned.id)
       const mac = device?.primaryMac ?? null
-      const ap = mac ? store.accessPoints.get(mac) : [...store.accessPoints.values()].find((item) => item.ip === planned.managementIp)
+      // Standalone polls are keyed by the planned id; controller polls by MAC.
+      const ap = store.accessPoints.get(planned.id) ?? (mac ? store.accessPoints.get(mac) : undefined) ?? [...store.accessPoints.values()].find((item) => item.ip === planned.managementIp)
       // LLDP beats the FDB for where a switch/router/AP hangs.
       let locatedAt: InfraState['locatedAt'] = null
       for (const other of switches) {
@@ -47,15 +48,17 @@ export function buildInfra(store: Store, switches: SwitchState[], devices: Devic
         lastSeenAt: reach.lastSeenAt ? new Date(reach.lastSeenAt).toISOString() : (device?.lastSeenAt ?? null),
         snmp: !monitored ? null : sw ? sw.snmp : sys ? snmpHealth(sys, true, now, Math.max(store.settings.polling.snmpConfigSeconds * 3, 300) * 1000) : null,
         sysName: sw?.sysName ?? sys?.name ?? null,
-        sysDescr: sw?.sysDescr ?? sys?.descr ?? null,
+        sysDescr: sw?.sysDescr ?? sys?.descr ?? (ap?.model && ap.firmware ? `${ap.model} ${ap.firmware}` : null),
         uptimeSeconds:
-          sw?.uptimeSeconds ?? (sys?.upTimeTicks !== null && sys ? Math.floor(sys.upTimeTicks / 100 + (now - sys.at) / 1000) : null),
+          sw?.uptimeSeconds ??
+          (sys?.upTimeTicks !== null && sys ? Math.floor(sys.upTimeTicks / 100 + (now - sys.at) / 1000) : null) ??
+          (ap?.uptimeSeconds !== null && ap?.lastOkAt ? Math.floor(ap.uptimeSeconds + (now - ap.lastOkAt) / 1000) : null),
         locatedAt,
         mac,
         wireless:
           planned.type === 'access-point'
-            ? ap
-              ? { clients: ap.clients, ssids: ap.ssids, radios: ap.radios }
+            ? ap && ap.lastOkAt !== null
+              ? { clients: ap.clients, ssids: [...new Set(ap.ssids.map((ssid) => ssid.ssid))], radios: ap.radios.map((radio) => ({ band: radio.band, channel: radio.channel, clients: radio.clients })) }
               : null
             : null,
       }

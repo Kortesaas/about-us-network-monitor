@@ -7,12 +7,13 @@ monitor is read-mostly and lives on the closed show network). Types are in
 | Method | Path | Purpose |
 | --- | --- | --- |
 | GET | `/api/health` | Liveness: version, mode, state version, connected browsers |
-| GET | `/api/state` | The complete `MonitorState` (summary, infra, switches, devices, vlans, topology, problems, events, scan, backend) |
+| GET | `/api/state` | The complete `MonitorState` (summary, infra, switches, devices, vlans, topology, wlan, traffic, problems, events, scan, backend) |
 | GET | `/api/events` | Server-Sent Events: `hello`, `state` (new version + changed keys), `scan` (job status), `event` (timeline entry), `ping` |
 | GET | `/api/events/history?limit=200` | Event timeline |
 | GET | `/api/scan/status` | Scheduler jobs with last run, duration, next due, errors |
-| POST | `/api/scan/request` `{ scope }` | Queue jobs now: `all`, `infra`, `switches`, `sweep`, `neighbors`, `switch:<id>`; cooldowns still apply |
-| GET | `/api/summary` · `/api/infra` · `/api/devices` · `/api/devices/:id` · `/api/switches` · `/api/switches/:id` · `/api/vlans` · `/api/topology` · `/api/problems` | Slices of the state |
+| POST | `/api/scan/request` `{ scope }` | Queue jobs now: `all`, `infra`, `switches`, `sweep`, `neighbors`, `wlan`, `switch:<id>`; cooldowns still apply |
+| GET | `/api/summary` · `/api/infra` · `/api/devices` · `/api/devices/:id` · `/api/switches` · `/api/switches/:id` · `/api/vlans` · `/api/topology` · `/api/wlan` · `/api/problems` | Slices of the state |
+| GET | `/api/traffic` | `TrafficState` with the full throughput history (the state only carries a short window) |
 | PUT | `/api/devices/:id/meta` | Create/update known-device metadata (`displayName`, `owner`, `category`, `notes`, `favorite`, `ignored`, `macs[]`, `ips[]`). A MAC belongs to one device; adding it here removes it from any other. |
 | DELETE | `/api/devices/:id/meta` | Remove metadata |
 | GET | `/api/known` | All known-device metadata |

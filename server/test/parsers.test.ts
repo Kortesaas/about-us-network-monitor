@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { parseArpAn, parseIpNeigh } from '../src/poll/neighbors.js'
+import { parseFping } from '../src/poll/ping.js'
 import { column, portListToPorts, suffix, asMac } from '../src/poll/snmp/client.js'
 import { mapInterfacesToPorts, plannedSpeedMbps } from '../src/poll/snmp/vendor.js'
 import { diffPort } from '../src/analysis/switches.js'
@@ -37,6 +38,23 @@ describe('neighbour table parsers', () => {
   it('parses macOS arp -an with unpadded octets', () => {
     const out = parseArpAn(`? (192.168.178.1) at 0:11:22:33:44:5 on en0 ifscope [ethernet]\n? (224.0.0.251) at 1:0:5e:0:0:fb on en0 ifscope permanent [ethernet]`)
     expect(out[0]).toEqual({ ip: '192.168.178.1', mac: '00:11:22:33:44:05', interface: 'en0', state: 'stale' })
+  })
+})
+
+describe('ping parser', () => {
+  it('parses fping alive output from this Pi', () => {
+    const results = new Map([
+      ['192.168.99.1', { ip: '192.168.99.1', alive: false, rttMs: null }],
+      ['192.168.99.10', { ip: '192.168.99.10', alive: false, rttMs: null }],
+      ['192.168.99.12', { ip: '192.168.99.12', alive: false, rttMs: null }],
+    ])
+    parseFping(`192.168.99.1 is alive (1.40 ms)
+192.168.99.10 : 0.827
+192.168.99.12 is unreachable
+`, results)
+    expect(results.get('192.168.99.1')).toMatchObject({ alive: true, rttMs: 1.4 })
+    expect(results.get('192.168.99.10')).toMatchObject({ alive: true, rttMs: 0.827 })
+    expect(results.get('192.168.99.12')).toMatchObject({ alive: false, rttMs: null })
   })
 })
 
@@ -107,5 +125,20 @@ describe('planned vs discovered diffs', () => {
   it('ignores unknown discovery and unused plan', () => {
     expect(diffPort(trunk, { pvid: null, untaggedVlanIds: [], taggedVlanIds: [], mode: 'unknown' })).toEqual([])
     expect(diffPort({ ...trunk, mode: 'unused' }, { pvid: 1, untaggedVlanIds: [1], taggedVlanIds: [], mode: 'access' })).toEqual([])
+  })
+})
+
+describe('router WAN interface detection', async () => {
+  const { isWanInterfaceName, counterRate } = await import('../src/poll/snmp/routerPoller.js')
+  it('picks the logical WAN links, not modem channels or LAN ports', () => {
+    expect(['DSL-1', 'VDSL', 'WAN-2', 'PPPOE-1', 'LTE-1'].every((name) => isWanInterfaceName(name, []))).toBe(true)
+    expect(['DSL-CH-1', 'XDSL-1', 'ETH-4', 'LAN-1', 'WLC-TUNNEL-1', 'BRG-1'].some((name) => isWanInterfaceName(name, []))).toBe(false)
+    expect(isWanInterfaceName('ETH-4', ['eth-4'])).toBe(true)
+    expect(isWanInterfaceName('DSL-1', ['ETH-4'])).toBe(false)
+  })
+  it('turns HC counters into bytes per second and ignores wraps', () => {
+    expect(counterRate(0, 1000, 10_000, 6000)).toBe(500)
+    expect(counterRate(0, 6000, 10_000, 1000)).toBeNull()
+    expect(counterRate(null, null, 10_000, 1000)).toBeNull()
   })
 })

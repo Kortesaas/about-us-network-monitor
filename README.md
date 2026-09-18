@@ -5,8 +5,8 @@ Live dashboard for the ABOUTUS event network, hosted on the Raspberry Pi
 on the network at **http://aboutus-net** or **http://192.168.99.2**.
 
 It takes the planning export of the [Network Config](../about-us-network-config)
-planner as the *plan*, discovers the *real* network over SNMP, LLDP, ARP and
-ping, and shows where the two differ — so during a show you can see at a glance
+planner as the *plan*, discovers the *real* network over SNMP, LLDP, ARP, ping
+and the access points' own web API, and shows where the two differ — so during a show you can see at a glance
 what is online, where it is plugged in, which VLAN it is in, and whether the
 trunks, APs and uplinks are healthy.
 
@@ -18,12 +18,14 @@ See [docs/screenshots.md](docs/screenshots.md) for what the demo scenario shows.
 | --- | --- |
 | **Overview** | One screen: health, infrastructure in use, internet/WAN and DNS checks (1.1.1.1, 8.8.8.8, hostname resolution), problems, recent changes. |
 | **Problems** | Production checks with severity, affected device/port, explanation and suggested fix (wrong access VLAN, missing VLAN on trunk, AP trunk mismatch, offline infrastructure, stale SNMP, duplicate IP, port errors, down uplinks, LLDP on access ports, device in wrong VLAN…). |
-| **Devices** | Everything currently on the network: IP, MAC, hostname/vendor, VLAN, switch + port, status (located / unlocated / relocating / stale / offline). Filter by VLAN, switch, status, known/unknown. Name, owner, category, notes, favourite/ignore and MAC aliases follow the device across IP and port changes. |
+| **Devices** | Everything currently on the network: IP, MAC, hostname/vendor, VLAN, switch + port (or the AP, SSID and signal for Wi-Fi devices), status (located / unlocated / relocating / stale / offline). Filter by VLAN, switch, status, known/unknown. Name, owner, category, notes, favourite/ignore and MAC aliases follow the device across IP and port changes. |
 | **Switches & Ports** | Physical port maps in the planner's colours and layouts (odd/even, bottom-up, SFP block). Per port: link, speed, live vs planned VLANs, learned MACs, located devices, LLDP neighbour, traffic and errors. Differences from the plan are marked. |
 | **Topology** | Live graph from LLDP with planned infrastructure as the backbone, link speed and VLANs, expected-but-missing trunks, optional located clients. |
 | **VLANs** | Planned and discovered VLANs, subnets, gateway reachability, members, and every port carrying the VLAN. |
+| **Traffic** | Internet download/upload as measured on the router's WAN interface (history, peaks, table view), everything routed over the router link, and per-VLAN throughput summed over the access ports of each VLAN. |
+| **WLAN** | Access points with radios (channel, width, power, throughput), SSIDs with their VLANs, and every Wi-Fi client with AP, SSID, band, signal, rate, traffic and connection time. Read directly from standalone Omada EAPs — no controller needed. |
 | **Events** | Timeline of joins, leaves, moves, link changes, outages, problems raised/cleared (kept across restarts). |
-| **Settings** | Setup (which planned devices are in use, new-show reset), polling cadence, thresholds, SNMP communities, discovery sources, inventory upload, Omada/syslog integrations, export/import. |
+| **Settings** | Setup (which planned devices are in use, new-show reset), polling cadence, thresholds, SNMP communities, discovery sources, inventory upload, access point login, Omada/syslog integrations, export/import. |
 
 **Not every planned device is on every job.** A planned device joins the
 *setup* automatically the first time it answers a ping and is never removed

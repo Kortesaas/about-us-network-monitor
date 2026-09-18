@@ -123,25 +123,106 @@ export type RawSysInfo = {
   lastDurationMs: number | null
 }
 
+export type RawRouterInterface = {
+  ifIndex: number
+  name: string
+  operUp: boolean
+  wan: boolean
+  inOctets: number | null
+  outOctets: number | null
+  inBps: number | null
+  outBps: number | null
+}
+
+/** Interface counters of a router (IF-MIB HC counters), with rates derived from the previous sample. */
+export type RawRouterTraffic = {
+  deviceId: string
+  interfaces: RawRouterInterface[]
+  /** The router's own bridge MAC table: which of its LAN ports a MAC is behind (Q-BRIDGE, when exposed). */
+  fdb: { mac: string; vlanId: number | null; ifIndex: number; portName: string }[]
+  /** Bridge port → ifIndex and ifIndex → ifName, refreshed with the interface list. */
+  bridgePorts: Map<number, number>
+  names: Map<number, string>
+  /** When the interface list was last discovered (names/status). */
+  discoveredAt: number
+  at: number
+  lastOkAt: number | null
+  lastError: string | null
+}
+
 export type RawWirelessClient = {
   mac: string
+  source: 'eap' | 'omada'
   ip: string | null
   hostname: string | null
+  /** Planned AP id (eap) or AP MAC (omada). */
+  apId: string
   apName: string | null
   apMac: string | null
   ssid: string | null
+  radioId: number | null
   band: string | null
+  vlanId: number | null
   signal: number | null
+  rateMbps: number | null
+  connectedSeconds: number | null
+  rxBytes: number | null
+  txBytes: number | null
+  rxBps: number | null
+  txBps: number | null
   at: number
 }
 
+export type RawApRadio = {
+  id: number
+  band: string
+  enabled: boolean
+  channel: number | null
+  frequencyMhz: number | null
+  widthMhz: number | null
+  mode: string | null
+  txPowerDbm: number | null
+  maxRateMbps: number | null
+  clients: number
+  rxBytes: number | null
+  txBytes: number | null
+  rxBps: number | null
+  txBps: number | null
+}
+
+export type RawApSsid = {
+  ssid: string
+  radioId: number
+  vlanId: number | null
+  security: string | null
+  guest: boolean
+  portal: boolean
+  clients: number
+}
+
 export type RawAccessPoint = {
-  mac: string
+  /** Planned AP id (eap) or AP MAC (omada). */
+  id: string
+  source: 'eap' | 'omada'
+  mac: string | null
   ip: string | null
   name: string
+  model: string | null
+  firmware: string | null
+  hardware: string | null
   status: 'online' | 'offline' | 'unknown'
+  uptimeSeconds: number | null
+  cpuPercent: number | null
+  memoryPercent: number | null
+  lanLink: string | null
   clients: number
-  ssids: string[]
-  radios: { band: string; channel: number | null; clients: number }[]
+  ssids: RawApSsid[]
+  radios: RawApRadio[]
+  /** Last poll attempt. */
   at: number
+  lastOkAt: number | null
+  /** When device info, radio settings and radio counters were last read (they are refreshed less often than clients). */
+  detailsAt: number | null
+  lastError: string | null
+  lastDurationMs: number | null
 }

@@ -1,3 +1,4 @@
+import type { HttpClient } from './eap.js'
 /**
  * Every way the backend touches the network goes through these interfaces so
  * the demo mode can swap in a simulated network and tests can stay offline.
@@ -61,6 +62,8 @@ export type Transports = {
   neighbors: NeighborSource
   snmp: SnmpTransport
   dns: DnsResolver
+  /** HTTP(S) client for devices with a web API (standalone Omada EAPs). */
+  http: HttpClient
   /** Local interfaces with IPv4 addresses (name, ip, cidr). */
   interfaces(): { name: string; ip: string; cidr: string }[]
 }

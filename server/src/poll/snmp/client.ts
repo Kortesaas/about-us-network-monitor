@@ -41,7 +41,7 @@ function convert(raw: RawVarbind, snmp: NetSnmp): SnmpValue {
   if (snmp.isVarbindError(raw)) return null
   const { type, value } = raw
   if (value === null || value === undefined) return null
-  if (type === COUNTER64 && Buffer.isBuffer(value)) return value.readBigUInt64BE(0)
+  if (type === COUNTER64 && Buffer.isBuffer(value)) return value.length ? BigInt(`0x${value.toString('hex')}`) : 0n
   if (type === OCTET_STRING || type === OPAQUE) return Buffer.isBuffer(value) ? value : Buffer.from(String(value))
   if (type === IP_ADDRESS) return String(value)
   if (typeof value === 'bigint' || typeof value === 'number') return value

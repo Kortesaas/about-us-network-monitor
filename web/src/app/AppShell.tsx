@@ -3,6 +3,7 @@ import { NavLink, useLocation, useNavigate } from 'react-router-dom'
 import {
   Activity,
   AlertTriangle,
+  BarChart3,
   Cable,
   Gauge,
   Menu,
@@ -16,6 +17,7 @@ import {
   Share2,
   Sun,
   Layers,
+  Wifi,
   X,
 } from 'lucide-react'
 import { cn } from '@/ui/cn'
@@ -25,6 +27,7 @@ import { useMonitor, type Connection } from '@/stores/monitorStore'
 import { useThemeStore, type Theme } from '@/stores/themeStore'
 import { HealthBadge, Age } from '@/components/status'
 import { CommandPalette } from '@/app/CommandPalette'
+import { useFavicon } from '@/app/useFavicon'
 
 const nav = [
   { label: 'Overview', to: '/overview', icon: Gauge },
@@ -33,6 +36,8 @@ const nav = [
   { label: 'Switches & Ports', to: '/switches', icon: Cable },
   { label: 'Topology', to: '/topology', icon: Share2 },
   { label: 'VLANs', to: '/vlans', icon: Layers },
+  { label: 'WLAN', to: '/wlan', icon: Wifi },
+  { label: 'Traffic', to: '/traffic', icon: BarChart3 },
   { label: 'Events', to: '/events', icon: Activity },
   { label: 'Settings', to: '/settings', icon: Settings },
 ]
@@ -46,6 +51,8 @@ const titles: [string, string][] = [
   ['/switches', 'Switches & Ports'],
   ['/topology', 'Topology'],
   ['/vlans', 'VLANs'],
+  ['/wlan', 'WLAN'],
+  ['/traffic', 'Traffic'],
   ['/events', 'Events'],
   ['/settings', 'Settings & Inventory'],
 ]
@@ -133,6 +140,7 @@ export function AppShell({ children }: { children: ReactNode }) {
   const location = useLocation()
   const navigate = useNavigate()
   const { state, connection, requestScan, requesting, scan, error } = useMonitor()
+  useFavicon(connection, state?.summary.health ?? null)
 
   useEffect(() => {
     try {
@@ -225,12 +233,6 @@ export function AppShell({ children }: { children: ReactNode }) {
 
         <div className="shrink-0 space-y-2 border-t border-line p-2">
           <LiveStatus collapsed={collapsed} />
-          {!collapsed && (
-            <div className="flex items-center justify-between px-1">
-              <span className="text-[11px] text-faint">Theme</span>
-              <ThemeToggle />
-            </div>
-          )}
           <button
             type="button"
             onClick={() => setCollapsed((value) => !value)}
@@ -286,7 +288,7 @@ export function AppShell({ children }: { children: ReactNode }) {
               <RefreshCw size={13} className={cn((requesting || scan?.busy) && 'spin')} />
               <span className="hidden sm:inline">Refresh</span>
             </button>
-
+            <ThemeToggle />
           </div>
         </header>
 
@@ -304,7 +306,8 @@ export function AppShell({ children }: { children: ReactNode }) {
           </div>
         ) : null}
 
-        <main className="min-h-0 flex-1 overflow-auto">{children}</main>
+        {/* stable gutter: the content width must not change when a page is short enough to lose its scrollbar */}
+        <main className="min-h-0 flex-1 overflow-auto [scrollbar-gutter:stable]">{children}</main>
       </div>
 
       {palette && <CommandPalette onClose={() => setPalette(false)} />}

@@ -14,6 +14,7 @@ import type {
   Transports,
 } from './transport.js'
 import { OID } from './snmp/oids.js'
+import { eapPasswordHash, type HttpClient, type HttpRequestInit, type HttpResponse } from './eap.js'
 
 /**
  * A simulated show network for `MONITOR_MODE=demo`. It answers pings, fills a
@@ -33,7 +34,20 @@ type SimClient = {
   online: (t: number) => boolean
   /** Alternative location (for the wandering laptop). */
   moveTo?: { switchId: string; port: number; every: number }
+  /** Wi-Fi association (standalone EAP simulation); `roamTo` swaps the AP every `every` ms. */
+  wifi?: { apIp: string; ssid: string; radio: 0 | 1; rssi: number; roamTo?: { apIp: string; every: number } }
 }
+
+/** Password the simulated EAPs accept (demo mode fills it into the settings). */
+export const DEMO_AP_PASSWORD = 'demo'
+
+const DEMO_SSIDS: { ssid: string; vlan: number }[] = [
+  { ssid: 'ABOUTUS-Control', vlan: 10 },
+  { ssid: 'ABOUTUS-MGMT', vlan: 0 },
+  { ssid: 'ABOUTUS-Light', vlan: 30 },
+  { ssid: 'ABOUTUS-Video', vlan: 40 },
+  { ssid: 'ABOUTUS-Audio', vlan: 20 },
+]
 
 const START = Date.now()
 const minutes = (n: number) => n * 60_000
@@ -83,9 +97,10 @@ export class DemoNetwork {
       add({ mac: mac(8, '3c:22:fb'), ip: '192.168.10.150', vlan: 10, switchId: foh.id, port: 3, hostname: 'ipad-stagemgr' })
       // Duplicate IP: a second device with a static address that clashes with the iPad.
       add({ mac: mac(9, 'b8:27:eb'), ip: '192.168.10.150', vlan: 10, switchId: foh.id, port: 5, hostname: null })
-      // Wi-Fi clients behind the AP trunk port (22).
-      add({ mac: mac(10, 'f0:2f:4b'), ip: '192.168.10.120', vlan: 10, switchId: foh.id, port: 22, hostname: 'iphone-manu' })
-      add({ mac: mac(11, '2c:f0:5d'), ip: '192.168.30.121', vlan: 30, switchId: foh.id, port: 22, hostname: 'ma3-onpc-tablet' })
+      // Wi-Fi clients behind the AP trunk port (22); the phone roams to the stage AP every few minutes.
+      add({ mac: mac(10, 'f0:2f:4b'), ip: '192.168.10.120', vlan: 10, switchId: foh.id, port: 22, hostname: 'iphone-manu', wifi: { apIp: '192.168.99.30', ssid: 'ABOUTUS-Control', radio: 1, rssi: -52, roamTo: { apIp: '192.168.99.31', every: minutes(3) } } })
+      add({ mac: mac(11, '2c:f0:5d'), ip: '192.168.30.121', vlan: 30, switchId: foh.id, port: 22, hostname: 'ma3-onpc-tablet', wifi: { apIp: '192.168.99.30', ssid: 'ABOUTUS-Light', radio: 1, rssi: -61 } })
+      add({ mac: mac(12, '3c:22:fb'), ip: '192.168.99.150', vlan: 99, switchId: foh.id, port: 22, hostname: 'ipad-manu', wifi: { apIp: '192.168.99.30', ssid: 'ABOUTUS-MGMT', radio: 0, rssi: -71 } })
     }
     if (stage) {
       add({ mac: mac(20, '00:1d:c1'), ip: '192.168.20.50', vlan: 20, switchId: stage.id, port: 9, hostname: 'stagebox-dante' })
@@ -105,6 +120,8 @@ export class DemoNetwork {
     }
     // Unlocated: answers pings and is in the router ARP table, but on the offline Jakob switch.
     add({ mac: mac(40, 'a4:83:e7'), ip: '192.168.40.60', vlan: 40, switchId: null, port: null, hostname: 'jakob-laptop' })
+    // Only located through the (flapping) stage AP: no switch ever learns this MAC on an edge port.
+    add({ mac: mac(41, 'f0:2f:4b'), ip: '192.168.40.61', vlan: 40, switchId: null, port: null, hostname: 'video-op-phone', wifi: { apIp: '192.168.99.31', ssid: 'ABOUTUS-Video', radio: 1, rssi: -58 } })
   }
 
   /** Scenario devices are addressed by inventory id where the planner has stable ids, else by management IP. */
@@ -130,6 +147,119 @@ export class DemoNetwork {
     if (!client.switchId || !client.port) return null
     if (client.moveTo && cycle(t, client.moveTo.every * 2) >= client.moveTo.every) return client.moveTo
     return { switchId: client.switchId, port: client.port }
+  }
+
+  /** Which AP a Wi-Fi client is on at time t (null when its AP is down). */
+  wifiApOf(client: SimClient, t: number): string | null {
+    if (!client.wifi || !client.online(t)) return null
+    const roamed = client.wifi.roamTo && cycle(t, client.wifi.roamTo.every * 2) >= client.wifi.roamTo.every
+    const apIp = roamed ? client.wifi.roamTo!.apIp : client.wifi.apIp
+    const ap = this.find(apIp)
+    return ap && this.isOnline(ap, t) ? apIp : null
+  }
+
+  private readonly eapSessions = new Map<string, string>()
+
+  /** The standalone EAP web API, close enough to the real thing for the eap.ts client to run unchanged. */
+  eapHttp(device: PlannedDevice, target: URL, init: HttpRequestInit, t: number): HttpResponse {
+    const ok = (data: unknown, extra: Record<string, unknown> = {}): HttpResponse => ({ status: 200, headers: {}, body: JSON.stringify({ error: 0, success: true, timeout: 'false', data, ...extra }) })
+    const loggedOut = (): HttpResponse => ({ status: 200, headers: {}, body: JSON.stringify({ success: true, timeout: true, mode: 'accessPoint', devInfo: 'EAP650' }) })
+    const html = '<!DOCTYPE html><html><head><title>Login</title></head><body id="login-body"></body></html>'
+    const cookieOf = (headers: Record<string, string> | undefined) => headers?.cookie?.match(/JSESSIONID=([^;]+)/)?.[1] ?? null
+    if (target.pathname === '/') {
+      if (init.method === 'POST') {
+        const form = new URLSearchParams(init.body ?? '')
+        if (form.get('username') === 'admin' && form.get('password') === eapPasswordHash(DEMO_AP_PASSWORD)) {
+          const session = `demo-${Math.random().toString(36).slice(2)}`
+          this.eapSessions.set(device.id, session)
+          return { status: 200, headers: { 'set-cookie': [`JSESSIONID=${session}; Path=/; HttpOnly; Secure=true`] }, body: '' }
+        }
+        return { status: 200, headers: {}, body: html }
+      }
+      return { status: 200, headers: { 'set-cookie': ['JSESSIONID=landing; Path=/; HttpOnly'] }, body: html }
+    }
+    if (target.pathname === '/data/login.json') return { status: 200, headers: {}, body: JSON.stringify({ error: 1, dutMode: 'EAP650', retryChances: 29, waitTime: 0 }) }
+    if (!target.pathname.startsWith('/data/') || !target.pathname.endsWith('.json')) return { status: 404, headers: {}, body: '404' }
+    // Same guards as the AP: the session cookie must be the newest one and the referer must be the AP itself.
+    if (cookieOf(init.headers) !== this.eapSessions.get(device.id) || !init.headers?.referer?.startsWith(`${target.origin}/`)) return loggedOut()
+    const endpoint = target.pathname.slice('/data/'.length, -'.json'.length)
+    const radioId = Number(target.searchParams.get('radioID') ?? 0)
+    const apMac = (this.infraMacs.get(device.id) ?? '00:00:00:00:00:00').toUpperCase().replace(/:/g, '-')
+    const clients = this.clients.filter((client) => this.wifiApOf(client, t) === device.managementIp)
+    const uptime = Math.floor((t - START) / 1000) + 5 * 3600
+    const hms = (seconds: number) => `${Math.floor(seconds / 86400)} days ${String(Math.floor((seconds % 86400) / 3600)).padStart(2, '0')}:${String(Math.floor((seconds % 3600) / 60)).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}`
+    switch (endpoint) {
+      case 'status.device':
+        return ok({
+          deviceName: `EAP650-${apMac}`,
+          deviceModel: 'EAP650',
+          firmwareVersion: '1.5.6 Build 20260629 Rel. 20690(4555)',
+          hardwareVersion: '3.0',
+          mac: apMac,
+          ip: device.managementIp,
+          subnetMask: '255.255.255.0',
+          lan_port_list: [{ status: '1000Mbps - FD', name: 'ETH(PoE)' }],
+          uptime: hms(uptime),
+          cpu: 1 + Math.round(Math.random() * 3),
+          memory: 36,
+        })
+      case 'status.wireless.radio':
+        return ok(
+          radioId === 0
+            ? { enable: 'Enable', region: 276, channel: '6   / 2437MHz', rate: '286.8Mbps', power: '20dBm', chanWidth: '20MHz', mode: 'b/g/n/ax mixed' }
+            : { enable: 'Enable', region: 276, channel: device.managementIp.endsWith('.31') ? '100 / 5500MHz' : '44  / 5220MHz', rate: '2402.0Mbps', power: '27dBm', chanWidth: '160MHz', mode: 'a/n/ac/ax mixed' },
+        )
+      case 'status.traffic.radio': {
+        const seconds = (t - START) / 1000
+        const scale = radioId === 1 ? 180_000 : 4_000
+        return ok({ rx_packets: 0, tx_packets: 0, rx_bytes: Math.floor(seconds * scale * 0.2), tx_bytes: Math.floor(seconds * scale), rx_dropped: 0, tx_dropped: 0, rx_errors: 0, tx_errors: 0 })
+      }
+      case 'status.wireless.ssid':
+        return {
+          status: 200,
+          headers: {},
+          body: JSON.stringify({
+            success: true,
+            timeout: false,
+            data: [0, 1].flatMap((radio) =>
+              DEMO_SSIDS.map((item, index) => ({
+                SSID: item.ssid,
+                key: index + 2,
+                vlan: item.vlan,
+                guest: false,
+                Radio: radio,
+                portal: false,
+                security: 3,
+                downTh: 0,
+                upTh: 0,
+                clients: clients.filter((client) => client.wifi!.ssid === item.ssid && client.wifi!.radio === radio).length,
+              })),
+            ),
+          }),
+        }
+      case 'status.client.user':
+        return ok(
+          clients.map((client, index) => {
+            const seconds = (t - START) / 1000
+            return {
+              key: index,
+              hostname: client.hostname ?? '',
+              Radio: client.wifi!.radio,
+              MAC: client.mac.toUpperCase().replace(/:/g, '-'),
+              IP: client.ip ?? '',
+              SSID: client.wifi!.ssid,
+              RSSI: client.wifi!.rssi + Math.round(Math.sin(seconds / 20 + index) * 3),
+              Rate: client.wifi!.radio === 1 ? '2401.0' : '286.8',
+              ActiveTime: hms(Math.floor(seconds) % 3600),
+              limit: 0,
+              Down: Math.floor(seconds * (50_000 + index * 20_000)),
+              Up: Math.floor(seconds * (8_000 + index * 3_000)),
+            }
+          }),
+        )
+      default:
+        return ok({})
+    }
   }
 
   /** Full MIB of a switch at time t as an OID → value map. */
@@ -241,6 +371,8 @@ export class DemoNetwork {
         const remote = this.inventory.devices.find((item) => item.id === link.b.deviceId)
         if (remote && this.isOnline(remote, t) && remote.type !== 'switch')
           mib.set(`${OID.dot1qTpFdbPort}.99.${macOid(this.infraMacs.get(remote.id)!)}`, link.a.port)
+        // The Pi is a tagged host (eth0.10/20/30/40): one MAC learned in every show VLAN on its trunk port.
+        if (remote && this.is(remote, '192.168.99.2')) for (const vlan of [10, 20, 30, 40]) mib.set(`${OID.dot1qTpFdbPort}.${vlan}.${macOid(this.infraMacs.get(remote.id)!)}`, link.a.port)
       }
     }
 
@@ -282,6 +414,26 @@ export class DemoNetwork {
     }
     for (const infra of this.inventory.devices)
       if (infra.managementIp && infra.id !== device.id && this.isOnline(infra, t)) add(99, infra.managementIp, this.infraMacs.get(infra.id)!)
+    const pi = this.find('192.168.99.2')
+    if (pi) for (const vlan of [10, 20, 30, 40]) add(vlan, `192.168.${vlan}.2`, this.infraMacs.get(pi.id)!)
+    // IF-MIB like a LANCOM: physical ETH ports, the WAN link ("DSL-1" over ETH-4) and a pile of idle tunnels.
+    const seconds = (t - START) / 1000
+    const iface = (ifIndex: number, name: string, up: boolean, inRate: number, outRate: number) => {
+      mib.set(`${OID.ifName}.${ifIndex}`, Buffer.from(name))
+      mib.set(`${OID.ifOperStatus}.${ifIndex}`, up ? 1 : 2)
+      // A slow swell every ~4 minutes with a burst on top, so graphs show something moving.
+      const wave = 0.6 + 0.4 * Math.sin(seconds / 40) + (Math.floor(seconds / 90) % 3 === 0 ? 0.8 : 0)
+      mib.set(`${OID.ifHCInOctets}.${ifIndex}`, Math.floor(inRate * (seconds + 20 * Math.sin(seconds / 40)) * wave))
+      mib.set(`${OID.ifHCOutOctets}.${ifIndex}`, Math.floor(outRate * (seconds + 15 * Math.cos(seconds / 55)) * wave))
+    }
+    iface(1, 'ETH-1', true, 900_000, 250_000)
+    iface(2, 'ETH-2', false, 0, 0)
+    iface(3, 'ETH-3', true, 40_000, 12_000)
+    iface(4, 'ETH-4', true, 850_000, 210_000)
+    iface(11, 'P2P-1-1', false, 0, 0)
+    iface(101, 'XDSL-1', false, 0, 0)
+    iface(129, 'DSL-1', true, 850_000, 210_000)
+    iface(130, 'DSL-CH-1', true, 850_000, 210_000)
     return mib
   }
 
@@ -457,11 +609,22 @@ export function createDemoTransports(inventory: Inventory): Transports & { netwo
     },
     servers: () => ['192.168.99.1'],
   }
+  const http: HttpClient = {
+    async request(url, init) {
+      await sleep(15)
+      const target = new URL(url)
+      const device = byIp(target.hostname)
+      const t = Date.now()
+      if (!device || device.type !== 'access-point' || !network.isOnline(device, t)) throw new Error(`connect ETIMEDOUT ${target.hostname}:${target.port || 443}`)
+      return network.eapHttp(device, target, init, t)
+    },
+  }
   return {
     ping,
     neighbors,
     snmp,
     dns,
+    http,
     interfaces: () => [{ name: 'eth0', ip: piIp, cidr: `${piIp}/24` }],
     network,
   }

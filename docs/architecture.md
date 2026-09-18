@@ -9,13 +9,14 @@
  │  state/store.ts     single source of truth: raw observations, known-device │
  │                     metadata, tracks, events; publish() → MonitorState     │
  │  analysis/*         raw → UI state: switches, devices, infra, vlans,       │
- │                     topology, checks (problems), summary                   │
+ │                     topology, wlan, checks (problems), summary             │
  │  poll/scheduler.ts  one job list; no overlap, pool limits, min gap         │
  │  poll/jobs.ts       builds jobs from settings + inventory                  │
  │  poll/snmp/*        net-snmp client, OIDs, vendor port mapping, pollers    │
  │  poll/ping.ts       fping (or system ping) sweeps and infra pings          │
  │  poll/neighbors.ts  ip neigh / arp -an                                     │
  │  poll/dns.ts        reverse DNS      poll/omada.ts   optional controller   │
+ │  poll/eap.ts        standalone Omada EAP web API: radios, SSIDs, clients   │
  │  poll/syslog.ts     optional UDP receiver → events                         │
  │  poll/demo.ts       simulated network behind the same interfaces          │
  └────────────────────────────────────────────────────────────────────────────┘
@@ -28,8 +29,10 @@
    port plans and layouts. It is the *expectation*, never treated as live truth.
 2. **Pollers** write raw observations into the `Store`: pings per IP, ARP rows
    (`ip|mac`, with source and freshness), per-switch SNMP snapshots (interfaces,
-   counters, VLAN tables, PVIDs, FDB, LLDP), router sysinfo, DNS cache, optional
-   wireless clients/APs.
+   counters, VLAN tables, PVIDs, FDB, LLDP), router sysinfo, DNS cache, and per
+   access point its radios, SSIDs and associated clients (standalone EAP web
+   API or Omada controller — both write the same `accessPoints` /
+   `wirelessClients` maps, tagged by source).
 3. After every job the scheduler asks the store to **publish**. `analysis/derive.ts`
    rebuilds the complete `MonitorState` (see `shared/types.ts`), the store diffs it
    against the previous one to produce **events**, and the SSE channel tells every

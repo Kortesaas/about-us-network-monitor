@@ -63,6 +63,12 @@ function buildSwitch(store: Store, device: PlannedDevice, raw: RawSwitch, now: n
   const switchMacs = new Map<string, string>()
   for (const other of store.switches.values())
     for (const iface of other.interfaces.values()) if (iface.physAddress) switchMacs.set(iface.physAddress, other.deviceId)
+  // Planned devices that are not polled (not in the setup, no SNMP) are still known by MAC through ARP on
+  // their management IP — that is how a disabled switch's LLDP chassis id is recognised as that device.
+  for (const entry of store.arp.values()) {
+    const planned = inventoryByIp.get(entry.ip)
+    if (planned && !switchMacs.has(entry.mac)) switchMacs.set(entry.mac, planned.id)
+  }
 
   // ifIndex per port.
   const ifIndexForPort = new Map<number, number>()

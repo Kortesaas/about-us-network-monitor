@@ -15,7 +15,7 @@ import type { Inventory } from '../inventory/plan.js'
 import { config } from '../config.js'
 import { log } from '../logger.js'
 import { writeJsonAtomic } from '../settings.js'
-import type { RawAccessPoint, RawArp, RawPing, RawSwitch, RawSysInfo, RawWirelessClient } from './raw.js'
+import type { RawAccessPoint, RawArp, RawPing, RawRouterTraffic, RawSwitch, RawSysInfo, RawWirelessClient } from './raw.js'
 import { emptyRawSwitch } from './raw.js'
 import { deriveState } from '../analysis/derive.js'
 import { isMonitoredIp } from '../inventory/plan.js'
@@ -39,7 +39,12 @@ type Persisted = {
   portsSeenUp: string[]
   infraUse: Record<string, InfraUse>
   events: MonitorEvent[]
+  traffic?: Record<string, TrafficPoint[]>
 }
+
+export type TrafficPoint = { t: number; inBps: number; outBps: number }
+/** Samples kept per traffic series: 6 h at 30 s, 3 h at 15 s. */
+export const TRAFFIC_HISTORY = 720
 
 /**
  * Everything the backend knows, raw and derived. Pollers write raw
@@ -52,6 +57,9 @@ export class Store {
   /** key `${ip}|${mac}` — several MACs per IP are kept on purpose (duplicate IP detection). */
   readonly arp = new Map<string, RawArp>()
   readonly sysInfo = new Map<string, RawSysInfo>()
+  readonly routerTraffic = new Map<string, RawRouterTraffic>()
+  /** Throughput history per series (`wan`, `router-link`, `vlan:<id>`), newest last. */
+  readonly traffic = new Map<string, TrafficPoint[]>()
   readonly dns = new Map<string, { hostname: string | null; at: number }>()
   readonly wirelessClients = new Map<string, RawWirelessClient>()
   readonly accessPoints = new Map<string, RawAccessPoint>()
@@ -105,6 +113,7 @@ export class Store {
       for (const [id, since] of Object.entries(data.problemsSince ?? {})) this.problemsSince.set(id, since)
       for (const key of data.portsSeenUp ?? []) this.portsSeenUp.add(key)
       for (const [id, use] of Object.entries(data.infraUse ?? {})) this.infraUse.set(id, use)
+      for (const [id, points] of Object.entries(data.traffic ?? {})) this.traffic.set(id, points.slice(-TRAFFIC_HISTORY))
       this.events = (data.events ?? []).slice(-this.settings.thresholds.eventHistory)
       logger.info(`restored ${this.known.size} known devices, ${this.tracks.size} device histories, ${this.events.length} events`)
     } catch (error) {
@@ -120,6 +129,7 @@ export class Store {
       problemsSince: Object.fromEntries(this.problemsSince),
       portsSeenUp: [...this.portsSeenUp],
       infraUse: Object.fromEntries(this.infraUse),
+      traffic: Object.fromEntries(this.traffic),
       events: this.events.slice(-this.settings.thresholds.eventHistory),
     }
     try {
@@ -131,6 +141,17 @@ export class Store {
   }
 
   markDirty() {
+    this.dirty = true
+  }
+
+  /** Appends one throughput sample unless the series already has one for that moment. */
+  recordTraffic(id: string, point: TrafficPoint) {
+    const list = this.traffic.get(id) ?? []
+    const last = list[list.length - 1]
+    if (last && point.t <= last.t) return
+    list.push(point)
+    if (list.length > TRAFFIC_HISTORY) list.splice(0, list.length - TRAFFIC_HISTORY)
+    this.traffic.set(id, list)
     this.dirty = true
   }
 
@@ -206,6 +227,27 @@ export class Store {
     this.problemsSince.clear()
     this.dirty = true
     this.addEvent({ kind: 'system', severity: 'info', message: 'New setup started — learned devices and trunks reset', subject: null })
+  }
+
+  /** Resolves a current show-state problem when the operator confirms it was intentional. */
+  resolveProblem(problemId: string): { ok: true; message: string } | { ok: false; status: number; error: string } {
+    const problem = this.current().problems.find((item) => item.id === problemId)
+    if (!problem) return { ok: false, status: 404, error: 'problem is not active' }
+    if (problem.code !== 'uplink-down' && problem.code !== 'ap-port-down')
+      return { ok: false, status: 400, error: 'this problem cannot be resolved manually yet' }
+    if (problem.subject.type !== 'port') return { ok: false, status: 400, error: 'problem is not tied to a switch port' }
+
+    this.portsSeenUp.delete(problem.subject.id)
+    this.problemsSince.delete(problem.id)
+    this.dirty = true
+    this.addEvent({
+      kind: 'problem-cleared',
+      severity: 'ok',
+      message: `Resolved: ${problem.title}`,
+      subject: problem.subject,
+    })
+    this.publish()
+    return { ok: true, message: 'problem resolved for this setup' }
   }
 
   /* ------------------------------------------------------------- known */
@@ -357,6 +399,11 @@ export class Store {
           message: `${device.name} located on ${device.location.switchName} port ${device.location.port}`,
           subject,
         })
+      // Wi-Fi: roamed to another AP, or joined/left the WLAN while staying online (a wired device would show as moved).
+      if (old.wireless && device.wireless && old.wireless.apId !== device.wireless.apId)
+        this.addEvent({ at, kind: 'device-roamed', severity: 'info', message: `${device.name} roamed from ${old.wireless.ap} to ${device.wireless.ap}${device.wireless.ssid ? ` (${device.wireless.ssid})` : ''}`, subject })
+      else if (!old.wireless && device.wireless && old.online && device.online)
+        this.addEvent({ at, kind: 'device-roamed', severity: 'info', message: `${device.name} joined Wi-Fi on ${device.wireless.ap}${device.wireless.ssid ? ` (${device.wireless.ssid})` : ''}`, subject })
     }
     // Infra reachability.
     const infraBefore = new Map(previous.infra.map((item) => [item.id, item]))

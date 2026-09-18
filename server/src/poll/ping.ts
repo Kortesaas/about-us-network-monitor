@@ -28,7 +28,7 @@ class FpingTransport implements PingTransport {
     const results = new Map<string, PingResult>(ips.map((ip) => [ip, { ip, alive: false, rttMs: null }]))
     try {
       // fping exits 1 when any host is unreachable, so the failure path is the normal path.
-      const { stdout } = await run('fping', ['-e', '-q', '-r', '1', '-i', '10', '-t', timeout, ...ips], {
+      const { stdout } = await run('fping', ['-e', '-r', '1', '-i', '10', '-t', timeout, ...ips], {
         maxBuffer: 4 * 1024 * 1024,
         timeout: 60_000,
       })
@@ -45,10 +45,13 @@ class FpingTransport implements PingTransport {
   }
 }
 
-function parseFping(output: string, results: Map<string, PingResult>) {
+export function parseFping(output: string, results: Map<string, PingResult>) {
   // "192.168.99.1 is alive (0.42 ms)" / "192.168.99.5 is unreachable"
+  // Some fping modes print "192.168.99.1  : 0.42"; accept that too.
   for (const line of output.split('\n')) {
-    const match = line.match(/^(\d+\.\d+\.\d+\.\d+)\s+is alive(?:\s+\(([\d.]+) ms\))?/)
+    const match =
+      line.match(/^(\d+\.\d+\.\d+\.\d+)\s+is alive(?:\s+\(([\d.]+) ms\))?/) ??
+      line.match(/^(\d+\.\d+\.\d+\.\d+)\s+:\s+([\d.]+)\b/)
     if (!match) continue
     const entry = results.get(match[1]!)
     if (entry) {

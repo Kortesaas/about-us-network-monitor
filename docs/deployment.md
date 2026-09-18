@@ -120,7 +120,8 @@ Then open http://192.168.99.2 from any device on the network.
   the front panel. `vendor.ts` documents the naming rules.
 * **Devices are "unlocated"** — the FDB poll is 2 min by default; the device may
   sit behind an uplink of a switch without SNMP (Allied without community), or
-  behind an AP (then Omada integration adds the AP/SSID).
+  behind an AP — enter the APs' admin login under Settings → Integrations →
+  Access points and the device shows its AP, SSID and signal instead.
 * **Everything in VLAN 10/20/30/40 is missing** — the Pi has no interface there
   and the router ARP job fails. Fix the router community or add VLAN
   sub-interfaces (section 1).
